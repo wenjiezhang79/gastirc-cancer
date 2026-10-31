@@ -58,7 +58,7 @@ ct:
     include_series_description: true  # 汇总中输出 SeriesDescription（自由文本；若发现含身份信息请设为 false）
   native_orientation: LPS          # 原始 NIfTI 的统一方向
   hu_clip: [-1024, 3071]
-  target_spacing: [0.8, 0.8, 5.0]  # 分析体素大小 (x, y, z) mm；最终值在 DICOM 汇总后确定
+  target_spacing: [0.8, 0.8, 5.0]  # 分析体素 (x, y, z) mm；z=5 mm 已确认，层面内间距待 DICOM 汇总后确定
   average_thin_slices: true        # 薄层降到目标层厚时多层平均（模拟厚层），而非直接抽层
   save_resampled: true             # 保存整卷重采样结果（nnU-Net / 整卷编码器使用）
   save_thin_series: false          # 另存同一次采集中最薄的软组织重建（供医生在薄层上标注）
