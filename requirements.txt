@@ -1,0 +1,18 @@
+# 运行依赖（固定版本）。以下版本组合已在 Python 3.10 上用假数据跑通全部测试；
+# 另在 Python 3.13 + 各包最新版上也测试通过。拿到服务器 env_check 报告后会按服务器实际版本调整。
+#
+# 全部为预编译 wheel，无需编译。离线安装方法见 README.md “离线安装”。
+# 注意：torch 使用服务器上已安装的版本（不在此列出，避免改动已能运行的 GPU 环境）。
+numpy==1.26.4
+scipy==1.11.4
+pandas==2.0.3
+PyYAML==6.0.1
+pydicom==2.4.4
+SimpleITK==2.3.1
+h5py==3.10.0
+tifffile==2023.12.9
+Pillow==10.2.0
+matplotlib==3.8.2
+openslide-python==1.4.1
+openslide-bin==4.0.0.6
+timm==0.9.16

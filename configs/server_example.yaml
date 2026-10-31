@@ -1,0 +1,21 @@
+# 服务器配置模板：复制为 configs/server.yaml 后修改路径（server.yaml 不要提交到 git 中含真实路径的版本）。
+_base_: default.yaml
+
+paths:
+  root: /data/gastric                 # ← 改成服务器上的数据根目录（绝对路径）
+  manifest: manifest/manifest.csv     # ← 病例清单
+  work_dir: work                      # 处理结果
+  output_dir: /data/gastric/outputs   # 运行日志与报告
+
+num_workers: 8
+
+trident:
+  job_dir: /data/gastric/trident_processed   # ← TRIDENT 输出根目录
+
+features:
+  extractor: uni2_h
+  extractors:
+    resnet50_trunc: {weights_path: /data/weights/resnet50/resnet50-0676ba61.pth}
+    uni2_h: {weights_path: /data/weights/uni2-h/pytorch_model.bin}
+    virchow2: {weights_path: /data/weights/virchow2/pytorch_model.bin}
+    gigapath: {weights_path: /data/weights/prov-gigapath/pytorch_model.bin}
