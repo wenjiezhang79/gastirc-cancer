@@ -1,0 +1,33 @@
+# ===== 患者数据：绝不提交 =====
+data/
+outputs/
+*.svs
+*.ndpi
+*.tif
+*.tiff
+*.dcm
+*.nii
+*.nii.gz
+*.h5
+*.hdf5
+*.csv
+*.xlsx
+*.xls
+!tests/fixtures/**
+!configs/**
+
+# ===== 模型权重 =====
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+weights/
+
+# ===== Python / 系统 =====
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+.venv/
+.DS_Store
