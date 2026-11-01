@@ -16,3 +16,10 @@ matplotlib==3.8.2
 openslide-python==1.4.1
 openslide-bin==4.0.0.6
 timm==0.9.16
+
+# ---- v2 可选（只在使用对应 CT 编码器时需要；纯 Python，离线安装见 docs/v2_offline_setup.md）----
+# monai==1.6.1          # CT-FM（SegResEncoder）、SuPreM（SwinUNETR）
+# einops==0.8.2         # SuPreM（SwinUNETR）
+# merlin-vlm            # Merlin（依赖较多，建议单独环境）
+# safetensors           # .safetensors 权重（timm 已依赖，一般已安装）
+# TotalSegmentator / nnunetv2 / pyradiomics 装在各自的独立环境中，不装进主环境。

@@ -14,6 +14,9 @@
 - 标签来源：<任务>_source 列优先，否则用 label_source。来源为 post_neoadj 且
   labels.use_post_neoadj=false 时，该任务的分型/标志物标签置为缺失（生存标签不受影响）。
 - 生存：os/dfs/pfs 的 time（月）与 event（0/1）原样复制；时间或事件任一缺失则两者都置缺失。
+- 临床 cT（v2 起）：ct_t_group = T1/T2/T3/T4（T1a/T1b 归入 T1，T4a/T4b 归入 T4，TX 为缺失）；
+  ct_t34 = cT3–4 为 1、cT1–2 为 0。cT 是治疗前信息，不受 post_neoadj 屏蔽；
+  **只用于勾画抽样分层、编码器筛选的辅助参考和 v4 统计分析，不作为模型输入，也不是主分析任务。**
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ class TaskDef:
     source_task: str   # 用于查找 <source_task>_source 列
     main: bool         # 是否主分析定义
     n_classes: int = 2
+    maskable: bool = True   # 标签来源为 post_neoadj 时是否按缺失处理（治疗前的临床分期不屏蔽）
 
 
 def task_definitions(cfg: Config) -> List[TaskDef]:
@@ -54,9 +58,20 @@ def task_definitions(cfg: Config) -> List[TaskDef]:
     tasks.append(TaskDef("ki67_frac", "regression", "ki67", False))
     if lc.get("ki67_threshold") is not None:
         tasks.append(TaskDef("ki67_high", "binary", "ki67", True))
+    tasks.append(TaskDef("ct_t34", "binary", "clinical_ct", False, maskable=False))
     for ep in ("os", "dfs", "pfs"):
         tasks.append(TaskDef(ep, "survival", ep, ep == "os"))
     return tasks
+
+
+def ct_t_group(v) -> Optional[str]:
+    """cT 取值 → T1/T2/T3/T4 分组；TX 或空为 None。"""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    s = str(v).strip()
+    if len(s) >= 2 and s[0] == "T" and s[1] in "1234":
+        return s[:2]
+    return None
 
 
 def _col(df: pd.DataFrame, name: str) -> pd.Series:
@@ -139,10 +154,14 @@ def derive_labels(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     if lc.get("ki67_threshold") is not None:
         out["ki67_high"] = np.where(ki.isna(), np.nan, (ki >= float(lc.ki67_threshold)).astype(float))
 
+    grp = _col(df, "ct_t").map(ct_t_group)
+    out["ct_t_group"] = grp
+    out["ct_t34"] = grp.map(lambda g: np.nan if g is None else (1.0 if g in ("T3", "T4") else 0.0)).astype(float)
+
     # 标签来源屏蔽
     if not lc.get("use_post_neoadj", False):
         for t in task_definitions(cfg):
-            if t.kind == "survival":
+            if t.kind == "survival" or not t.maskable:
                 continue
             src = _source(df, t.source_task)
             mask = src == "post_neoadj"

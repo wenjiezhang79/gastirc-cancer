@@ -19,3 +19,20 @@ features:
     uni2_h: {weights_path: /data/weights/uni2-h/pytorch_model.bin}
     virchow2: {weights_path: /data/weights/virchow2/pytorch_model.bin}
     gigapath: {weights_path: /data/weights/prov-gigapath/pytorch_model.bin}
+
+# ---- v2 CT 分支（外部工具装在独立环境中，见 docs/v2_offline_setup.md） ----
+v2:
+  external:
+    totalseg:
+      command: /opt/envs/totalseg/bin/TotalSegmentator   # ← TotalSegmentator 独立环境
+      home_dir: /data/weights/totalseg_home              # ← TotalSegmentator 权重目录
+    nnunet:
+      bin_dir: /opt/envs/nnunet/bin                      # ← nnU-Net 独立环境
+  features:
+    encoders:
+      imagenet_r50: {weights_path: /data/weights/resnet50/resnet50-0676ba61.pth}
+      radimagenet_r50: {weights_path: /data/weights/radimagenet/ResNet50.pt}
+      dinov2_vitb14: {weights_path: /data/weights/dinov2/dinov2_vitb14_pretrain.pth}
+      ctfm: {weights_path: /data/weights/ct_fm/model.safetensors}
+      suprem: {weights_path: /data/weights/suprem/supervised_suprem_swinunetr_2100.pth}
+      merlin: {weights_path: /data/weights/merlin/merlin.pt}

@@ -49,6 +49,58 @@ def _specs(cfg: Config, names: Optional[List[str]] = None) -> List[dict]:
     return specs
 
 
+def find_spec(cfg: Config, name: str) -> dict:
+    """按名称查找裁剪规格：ct.crop.specs 与 v2.features.roi_specs（v2 编码器专用规格）。"""
+    pool = list(cfg.ct.crop.specs) + list(cfg.get_path("v2.features.roi_specs", []) or [])
+    for s in pool:
+        if s.get("name") == name:
+            return dict(s)
+    raise UserError(f"找不到裁剪规格 {name}",
+                    f"请在 ct.crop.specs 或 v2.features.roi_specs 中定义；现有：{', '.join(s.get('name', '?') for s in pool)}")
+
+
+def case_centers(case: dict, cfg: Config, native):
+    """返回 (中心点物理坐标或 None, 肿瘤分割质心物理坐标或 None)。"""
+    import SimpleITK as sitk
+
+    point_phys = None
+    pt = [case.get(f"ct_point_{a}") for a in "xyz"]
+    if all(v is not None for v in pt):
+        if not T.inside(native, pt):
+            raise CaseError(f"中心点 ({pt[0]}, {pt[1]}, {pt[2]}) 不在图像范围内 {native.GetSize()}")
+        point_phys = T.index_to_physical(native, pt)
+    mask_c = None
+    mp = resolve_path(cfg, case.get("tumor_mask_path"))
+    if mp is not None and mp.exists():
+        mask_c = T.mask_centroid_physical(sitk.Cast(sitk.ReadImage(str(mp)) > 0, sitk.sitkUInt8))
+    return point_phys, mask_c
+
+
+def spec_center(spec: dict, point_phys, mask_c):
+    """按规格的 center 方式选中心，返回 (中心, 来源) 或 (None, None)。"""
+    mode = spec.get("center", "point_or_mask")
+    if mode == "point":
+        return (point_phys, "point") if point_phys is not None else (None, None)
+    if mode == "mask_centroid":
+        return (mask_c, "mask") if mask_c is not None else (None, None)
+    if point_phys is not None:
+        return point_phys, "point"
+    return (mask_c, "mask") if mask_c is not None else (None, None)
+
+
+def roi_array(native, center, spec: dict, cfg: Config):
+    """从 native 图像按规格生成 ROI 数组 (z, y, x)（已按规格的窗宽与标准化方式处理）。返回 (数组, 填充比例)。"""
+    import SimpleITK as sitk
+
+    ref = T.roi_reference(center, spec["spacing"], spec["size_vox"])
+    hu = T.resample_image(native, ref, default=float(cfg.ct.hu_clip[0]),
+                          average_thin=bool(cfg.ct.get("average_thin_slices", True)))
+    arr = sitk.GetArrayFromImage(hu)
+    win = spec["window"]
+    norm = T.window_normalize(arr, float(win["level"]), float(win["width"]), spec.get("normalize", "minmax"))
+    return norm.astype(np.float32), T.outside_fraction(native, ref)
+
+
 def crop_case(case: dict, cfg: Config) -> dict:
     import SimpleITK as sitk
 

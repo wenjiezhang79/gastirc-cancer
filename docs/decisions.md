@@ -95,3 +95,25 @@
 2. 在联网机器上准备 TotalSegmentator 的离线安装包和权重（v2 用）。
 3. 整理各中心检测方法和标签来源。
 4. v0 完成后，在服务器上先跑 `env_check`，再跑 TRIDENT 特征导入，把两份报告贴回来。
+
+## 十三、v2 实现约定（2026-11-01 确认）
+
+1. **两阶段分割与中心点的分工：** 第一阶段 TotalSegmentator 分割胃（现成模型，无需标注）；第二阶段在胃外扩 20 mm
+   （并保证中心点周围 ±48 mm）内用 nnU-Net 分割肿瘤。**主方案的 ROI 中心 = 医生中心点**（胃癌自动检测难度大，
+   中心点约 1 分钟一例，可保证每例位置正确）；分割用于影像组学、以分割质心为中心的裁剪（敏感性分析，可检验全自动定位是否可行）、
+   中心点核查。自动分割全部经医生审核后才作为 `auto_reviewed` 使用。
+2. **nnU-Net 训练数据：** 只用内部训练集的人工勾画（按 cT 分层抽 200–300 例，`21_seg_sample.sh`）；内部测试集与外部中心的勾画不用于训练。
+   分割模型只学"肿瘤在哪"、不接触分型与预后标签，因此对其余病例（含测试集与外部队列）做自动分割不构成标签泄漏。
+3. **cTNM：** 清单新增结构化列 `ct_t / ct_n / ct_m / ct_stage_source / ajcc_edition`。cTNM **不作为任何模型的输入**，
+   只用于：勾画病例分层抽样；CT 编码器筛选的辅助参考（cT3–4 vs cT1–2 AUC，不参与排名）；v4 的多因素 Cox、列线图与分期分层分析。
+4. **CT 编码器（冻结提特征）：** 2.5D 用 RadImageNet ResNet50、ImageNet ResNet50、DINOv2 ViT-B/14（中心层 ±3 / ±7 层，相邻 3 层作 RGB）；
+   3D 用 CT-FM、Merlin，SuPreM 为对照；影像组学（pyradiomics，bin width 25 HU，L1 线性模型）为基线。
+   3D 模型与 RadImageNet 的适配**须在服务器上用 3–5 例与官方示例代码核对**（`--dump-inputs`，余弦相似度 > 0.99）后再全量提取。
+5. **编码器比较（预先规定，只比一次）：** CT 单模态多任务模型（预设 screening：Lauren + OS + cT 辅助头，3 个随机种子，其余超参数固定），
+   排名指标 = 折外 OS C-index 与 Lauren 宏平均 AUC 的平均，报告与第一名的配对 bootstrap 差值；影像组学基线一起列出。选定后锁定。
+6. **CT 特征接口（v2 / v3 共用）：** `work/ct/features/<编码器>/<study_id>.h5`，每个 ROI 角色（tumor / regional）一个 `[n, D]` 数据集；
+   CT 单模态模型每个 ROI 聚合为 1 个 token（门控注意力），缺少的 ROI 用可学习占位 token，训练时随机丢弃一个 ROI（0.1）。
+7. **外部工具：** TotalSegmentator、nnU-Net、pyradiomics 各用独立环境，主流程通过命令行调用；运行时不联网，缺权重时报错。
+   安装包可在联网电脑上准备后传到服务器（`docs/v2_offline_setup.md`）。
+8. **v1 代码不修改：** v2 新建通用 token 多任务框架（`gastric_mm/mtl/`），只导入 v1 的输出头、损失、标签构建、生存时间段与评估函数；
+   v1 实验指纹不受新增 v2 配置的影响（有测试保证）。

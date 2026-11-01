@@ -1,0 +1,20 @@
+# v2 CT 流程（体模假数据）演示配置：bash scripts/run_v2_demo.sh 的第一部分使用。
+# TotalSegmentator / nnU-Net 用 gastric_mm.fake_tools 中的假命令代替（演示脚本中通过 --set 指定）。
+_base_: fake_demo.yaml
+
+paths:
+  root: data/fake_v2_ct
+  manifest: manifest.csv
+  work_dir: work
+  output_dir: outputs
+
+fake_data:
+  n_per_center: {internal: 12, ext1: 2, ext2: 1, ext3: 1}
+
+v2:
+  seg_sample: {n: 4}
+  features:
+    slices_2d: {tumor: 2, regional: 3}
+    encoders:
+      random_small_2d: {feature_dim: 16, rois: {tumor: tumor_small, regional: regional_small}}
+      random_small_3d: {feature_dim: 16, rois: {tumor: tumor_small, regional: regional_small}}
