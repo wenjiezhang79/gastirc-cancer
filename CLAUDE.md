@@ -167,7 +167,14 @@
   - 顺带修复：pandas 3 下 cT 为 TX 时 `ct_t34` 被误标为 0（应为缺失）
   - 主模型加直通路径（`v3.model.skip`，研究者 2026-11-01 选定方案 A；`abl_noskip` 为消融）。假数据上融合 MSI 仍低于 v1，主因是总损失早停时机（第 6–9 epoch），规则不改；诊断见 `docs/v3_diagnosis.md`（原因：多任务早停被无信号任务拉早 + 分支 token 在训练病例上"背过答案"，均为小样本现象，假数据 1200 例时差距基本消失）；早停诊断工具 `fusion.diagnose`（`36_v3_diagnose.sh`），真实数据上用它与非劣效检查核对
   - 待服务器验证：真实数据上的显存、速度与指标
-- [ ] **v4 评估统计**：方案与统计分析计划已于 2026-11-01 与研究者确认（`docs/decisions.md` 第十五节）；代码待开发
+- [x] **v4 评估统计**（2026-11-01 完成代码，假数据 CPU 测试通过；尚未在真实数据上运行。方案与统计分析计划见 `docs/decisions.md` 第十五节）
+  - 清单新增可选列 `adj_chemo / first_line / neoadj_regimen / immuno_setting / trg / pcr` 等；派生规则集中在 `evaluation/clinical.py`（AJCC 8 cTNM 分期分组、治疗模式、一线方案合并）
+  - 统计工具 `gastric_mm/stats/`（纯 numpy/scipy）：KM、log-rank、反向 KM 随访、Cox（Efron、分层、加权 + 稳健方差、比例风险检验）、
+    时间依赖 AUC（IPCW）、DeLong、校准（截距 / 斜率 / 截距重新校准）、决策曲线、作图；`tests/test_stats.py` 用 Freireich 6-MP 数据核对（log-rank 16.79、Efron −1.572）
+  - 分析模块 `gastric_mm/evaluation/`：分析用数据表（供 R / SPSS 复核）、分类评价、预后四层（含预先规定的成功标准）、列线图、新辅助疗效、免疫亚组（逆概率加权）、
+    可解释性图、表 1 / 流程图 / TRIPOD+AI；无 `--final` 结果时为开发模式；图中文字默认英文（`v4.figure_language`）
+  - 实现时的调整：新辅助疗效模型改用主模型输出（概率与风险评分）作特征，而非折外嵌入（各折嵌入空间不可比）
+  - 脚本 `40_`–`48_`、`run_v4_demo.sh`；待服务器验证：真实数据上的各项统计与图表格式；研究团队需补充治疗、TRG / pCR、免疫场景等列
 
 ## 9. 评估规范
 

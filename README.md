@@ -7,7 +7,7 @@
 - 方案决策汇总：`docs/decisions.md`
 - CT 标注规范（草稿）：`docs/ct_annotation_protocol.md`
 
-当前版本：**v0 数据层** + **v1 病理多任务模型** + **v2 CT 分支** + **v3 融合**（代码完成，尚未在真实数据上运行）。
+当前版本：**v0 数据层** + **v1 病理多任务模型** + **v2 CT 分支** + **v3 融合** + **v4 评估统计**（代码完成，尚未在真实数据上运行）。
 
 - v2 外部工具与权重的离线准备：`docs/v2_offline_setup.md`
 
@@ -213,6 +213,26 @@ MAIN=fusion_main bash scripts/34_v3_compare.sh
 注意：内层验证（早停）名单由 v1 / v2 / v3 三方共用（`work/splits/inner_val/`，第一次训练时自动生成）；
 若划分被重新生成，程序会报错并提示需要重跑的实验。先用假数据验证环境（CPU，约 5 分钟）：`bash scripts/run_v3_demo.sh`。
 
+## 二e、v4 评估统计
+
+前提：参与分析的模型已定型，在配置 `v4.models` 中填写主模型（如 `fusion/fusion_main`）与对照模型；统计分析计划见 `docs/decisions.md` 第十五节
+（**须在任何 `--final` 之前定稿**）。没有最终评估结果时为"开发模式"，只分析内部训练集折外预测，可先看图表格式。
+
+| 脚本 | 做什么 | 结果（`outputs/v4/<步骤>/<时间>/`） |
+|---|---|---|
+| `40_v4_table.sh` | 分析用数据表（各模型预测 + 协变量 + 冻结量），供 R / SPSS 复核 | `analysis_table.csv`（只在服务器保存）、`sources.md` |
+| `41_v4_classification.sh` | 分类任务：AUC（DeLong）、PR、敏感度 / 特异度、模型间比较、校准 | `report.md`（可贴回）、`figs/` |
+| `42_v4_prognosis.sh` | 预后四层：整体、分期 / 治疗分层、中心 / 校准 / 决策曲线、交互作用；成功标准判定 | `report.md`（可贴回）、`figs/` |
+| `43_v4_nomogram.sh` | 列线图（风险评分 + cTNM + 年龄），冻结后验证 | `report.md`、`nomogram.json`、`figs/` |
+| `44_v4_neoadj.sh` | 新辅助疗效（pCR / TRG 0–1）探索 | `report.md`、`figs/` |
+| `45_v4_immuno.sh` | 免疫治疗亚组（分场景、逆概率加权） | `report.md`、`figs/` |
+| `46_v4_explain.sh` | 病理注意力热图、CT 各层注意力 | `figs/`、`cases.csv` |
+| `47_v4_tables.sh` | 表 1、流程图人数、TRIPOD+AI 清单 | `table1.md`、`flow.md`、`tripod_ai.md` |
+| `48_v4_all.sh` | 一键运行 40–47 | 同上 |
+
+图中文字默认英文（`v4.figure_language: zh` 可改中文，需服务器有中文字体）。研究团队需在清单中补充治疗、TRG / pCR、免疫场景等列
+（见 CLAUDE.md 5.1 与 `docs/decisions.md` 第十五节第 4 小节）；没有的列对应分析会自动跳过并注明。先用假数据验证环境（CPU，约 10 分钟）：`bash scripts/run_v4_demo.sh`。
+
 ## 三、哪些可以贴回、哪些不能
 
 | 可以贴回（已确认只含 study_id） | **不能拷出服务器** |
@@ -276,6 +296,8 @@ gastric_mm/
 ├── mtl/      data.py  model.py  fusion_model.py  trainer.py  experiment.py  spec.py （通用 token 多任务框架，v2/v3 共用）
 ├── ct_mtl/   train.py  predict.py  compare.py  radiomics_model.py  linear.py
 ├── fusion/   check.py  train.py  late.py  compare.py  predict.py  diagnose.py  common.py   （v3 融合；模型在 mtl/fusion_model.py）
+├── stats/    survival.py  classification.py  plots.py                 （v4 统计工具，纯 numpy/scipy）
+├── evaluation/ clinical.py  common.py  table.py  classification.py  prognosis.py  nomogram.py  neoadj.py  immuno.py  explain.py  tables.py   （v4 分析）
 ├── fake_tools/ totalseg.py  nnunet_predict.py                         （测试与演示用的假外部工具）
 ├── ct/   dicom_io.py  summary.py  convert.py  transforms.py  import_points.py  transfer.py  crop.py  qc.py
 │         external.py  stomach_seg.py  seg_sample.py  nnunet_data.py  tumor_post.py  import_reviewed.py
