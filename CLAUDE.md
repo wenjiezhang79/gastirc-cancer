@@ -63,6 +63,8 @@
 | `ctnm_stage`, `age`, `sex`, `ecog` | 临床协变量 | 按需 |
 | `ct_t`, `ct_n`, `ct_m` | 结构化治疗前临床分期（v2 起，可选） | `T1/T1a/T1b/T2/T3/T4/T4a/T4b/TX`（可写 cT3）、`N0–N3/N+/NX`、`M0/M1/MX` |
 | `ct_stage_source`, `ajcc_edition` | 分期来源、AJCC 版本 | `report` / `research_read`；如 8 |
+| `adj_chemo`, `first_line`, `neoadj_regimen`, `immuno_setting` | 治疗信息（v4 起，可选；只用于统计分析，不作模型输入） | 见 `docs/decisions.md` 第十五节第 4 小节 |
+| `trg`, `pcr` | 新辅助后病理缓解（v4 起，可选） | TRG 0–3（AJCC/CAP）；pCR 0/1（专家判定） |
 
 - **空值表示缺失**，训练时对应任务的损失被屏蔽，不删除病例。
 - 由原始字段派生训练标签的规则集中写在一个模块里（如 HER2 阳性 = IHC 3+ 或 2+ 且 FISH 阳性；PD-L1 阈值 1/5/10；Claudin18.2 阳性 = ≥75%）。
@@ -109,6 +111,11 @@
 17. 治疗方式不作为模型输入；临床变量留到列线图阶段。
 18. 外部队列定型后只运行一次，按中心报告；MSI、EBV 另报外部合并结果；内部可做按时间的伪外部检验。
 19. 每一层复杂结构都要有简单基线对照（均值池化 vs ABMIL、后期融合 vs Transformer、单任务 vs 多任务）。
+
+### 6.6 评估统计（v4，2026-11-01 确认；同时是统计分析计划，须在任何 `--final` 之前定稿）
+20. 预后分四层（手术与不可切除分开，均用同一模型的风险评分）：① 整体 C-index、KM、多因素 Cox（按中心分层）、相对 cTNM 的增量 C-index（主要）；② 按分期、按治疗组分层（关键次要）；③ 按中心、校准、决策曲线、DFS/PFS（次要）；④ 风险 / 预测标志物 × 治疗的交互作用（探索）。成功标准与细则见 `docs/decisions.md` 第十五节。
+21. 新辅助疗效（pCR / TRG）与免疫治疗亚组（分场景、逆概率加权）为探索性分析，不改主模型。
+22. 统计方法用 numpy/scipy 自己实现；自动出图出表，另导出分析用数据表供 R / SPSS 复核。
 
 ## 7. 开发路线
 
@@ -160,7 +167,14 @@
   - 顺带修复：pandas 3 下 cT 为 TX 时 `ct_t34` 被误标为 0（应为缺失）
   - 主模型加直通路径（`v3.model.skip`，研究者 2026-11-01 选定方案 A；`abl_noskip` 为消融）。假数据上融合 MSI 仍低于 v1，主因是总损失早停时机（第 6–9 epoch），规则不改；诊断见 `docs/v3_diagnosis.md`（原因：多任务早停被无信号任务拉早 + 分支 token 在训练病例上"背过答案"，均为小样本现象，假数据 1200 例时差距基本消失）；早停诊断工具 `fusion.diagnose`（`36_v3_diagnose.sh`），真实数据上用它与非劣效检查核对
   - 待服务器验证：真实数据上的显存、速度与指标
-- [ ] v4 评估统计
+- [x] **v4 评估统计**（2026-11-01 完成代码，假数据 CPU 测试通过；全部测试 164 项通过（Python 3.13 + pandas 3），`run_v4_demo.sh` 跑通；尚未在真实数据上运行。方案与统计分析计划见 `docs/decisions.md` 第十五节）
+  - 清单新增可选列 `adj_chemo / first_line / neoadj_regimen / immuno_setting / trg / pcr` 等；派生规则集中在 `evaluation/clinical.py`（AJCC 8 cTNM 分期分组、治疗模式、一线方案合并）
+  - 统计工具 `gastric_mm/stats/`（纯 numpy/scipy）：KM、log-rank、反向 KM 随访、Cox（Efron、分层、加权 + 稳健方差、比例风险检验）、
+    时间依赖 AUC（IPCW）、DeLong、校准（截距 / 斜率 / 截距重新校准）、决策曲线、作图；`tests/test_stats.py` 用 Freireich 6-MP 数据核对（log-rank 16.79、Efron −1.572）
+  - 分析模块 `gastric_mm/evaluation/`：分析用数据表（供 R / SPSS 复核）、分类评价、预后四层（含预先规定的成功标准）、列线图、新辅助疗效、免疫亚组（逆概率加权）、
+    可解释性图、表 1 / 流程图 / TRIPOD+AI；无 `--final` 结果时为开发模式；图中文字默认英文（`v4.figure_language`）
+  - 实现时的调整：新辅助疗效模型改用主模型输出（概率与风险评分）作特征，而非折外嵌入（各折嵌入空间不可比）
+  - 脚本 `40_`–`48_`、`run_v4_demo.sh`；待服务器验证：真实数据上的各项统计与图表格式；研究团队需补充治疗、TRG / pCR、免疫场景等列
 
 ## 9. 评估规范
 

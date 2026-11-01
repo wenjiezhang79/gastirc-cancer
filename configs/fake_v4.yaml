@@ -1,0 +1,24 @@
+# v4 假数据演示配置：bash scripts/run_v4_demo.sh 使用（全部为假数据，含已知的治疗效应与交互作用）。
+_base_: fake_v3.yaml
+
+paths:
+  root: data/fake_v4
+
+fake_data:
+  mm_cohort:
+    n_internal: 600
+    n_external: 240
+    path_missing: 0.06
+    v4_effects: true
+
+v3:
+  init: {path_exp: demo_path, ct_exp: demo_ct}
+
+v4:
+  models:
+    main: fusion/demo_fusion
+    compare: [path_mtl/demo_path, ct_mtl/demo_ct, fusion/late_stack]
+  n_boot: 200
+  min_events: 20
+  min_group_n: 15
+  neoadj: {endpoint: pcr, min_pos: 15, pcr_definition: "假数据"}

@@ -42,6 +42,7 @@ MANIFEST_COLUMNS = [
     "cldn182_pct", "ki67_pct", "label_source", "population", "os_months", "os_event", "dfs_months",
     "dfs_event", "pfs_months", "pfs_event", "neoadj", "immuno", "ctnm_stage", "age", "sex", "ecog",
     "tumor_visibility", "borrmann", "ct_t", "ct_n", "ct_m", "ct_stage_source",
+    "adj_chemo", "first_line", "neoadj_regimen", "immuno_setting", "trg", "pcr", "surgery_type", "d2", "diag_year",
 ]
 
 
@@ -630,6 +631,52 @@ def generate_feature_cohort(cfg: Config, logger=None, overwrite: bool = False) -
 # ============================================================
 # v2 / v3 用：多模态假特征队列（病理特征 + CT ROI 特征 + 影像组学表，埋入已知信号）
 # ============================================================
+def _fake_v4_clinical(rng, pop: str, ti: int, msi: int, lauren: int, z: float) -> dict:
+    """v4 用的假临床协变量与治疗（独立随机数）。返回清单列（字符串）与 _loghr（v4_effects 时写进生存时间的对数风险比）。"""
+    age = float(np.clip(rng.normal(62, 10), 25, 90))
+    ecog = int(rng.choice(3, p=[0.55, 0.35, 0.10]))
+    ct_n = ["N0", "N1", "N2", "N3"][int(np.clip(rng.binomial(3, 0.2 + 0.15 * ti), 0, 3))]
+    loghr = 0.3 * ecog
+    out = {"age": f"{age:.0f}", "sex": str(rng.choice(["M", "F"], p=[0.68, 0.32])), "ecog": str(ecog), "ct_n": ct_n,
+           "diag_year": str(int(rng.choice(np.arange(2015, 2024)))), "neoadj": "0", "immuno": "0"}
+    if pop == "resected":
+        out["ct_m"] = "M0"
+        neo = int(rng.rand() < 0.15 + 0.15 * (ti >= 2))
+        out["neoadj"] = str(neo)
+        out["surgery_type"] = str(rng.choice(["distal", "total", "proximal"], p=[0.55, 0.38, 0.07]))
+        out["d2"] = str(int(rng.rand() < 0.93))
+        if neo:
+            reg = str(rng.choice(["chemo", "chemoradio", "chemo_io"], p=[0.6, 0.1, 0.3]))
+            out["neoadj_regimen"] = reg
+            io = int(reg == "chemo_io")
+            p_pcr = 1 / (1 + np.exp(-(-2.2 + 2.5 * msi + 1.6 * (lauren == 0) + 0.7 * io)))
+            pcr = int(rng.rand() < p_pcr)
+            out["pcr"] = str(pcr)
+            out["trg"] = "0" if pcr else str(int(rng.choice([1, 2, 3], p=[0.3, 0.4, 0.3])))
+            out["adj_chemo"] = str(int(rng.rand() < 0.6))
+            if io:
+                out["immuno"], out["immuno_setting"] = "1", "neoadj"
+            loghr += -0.2
+        else:
+            adj = int(rng.rand() < 0.72)
+            out["adj_chemo"] = str(adj)
+            if adj:
+                loghr += -0.2 - 0.5 * (z > 0)                    # 高风险者从辅助化疗获益更多
+            if rng.rand() < 0.08:
+                out["immuno"], out["immuno_setting"] = "1", "adjuvant"
+    else:
+        out["ct_m"] = "M1" if rng.rand() < 0.8 else "M0"
+        fl = str(rng.choice(["none", "chemo", "chemo_her2", "chemo_io", "chemo_cldn"], p=[0.1, 0.4, 0.1, 0.3, 0.1]))
+        out["first_line"] = fl
+        if fl == "chemo_io":
+            out["immuno"], out["immuno_setting"] = "1", "first_line"
+            loghr += -0.1 - 0.8 * msi                            # MSI-H 从免疫治疗获益更多
+        elif fl == "none":
+            loghr += 0.5
+    out["_loghr"] = float(loghr)
+    return out
+
+
 def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dict:
     """生成多模态假特征队列（不生成图像）：清单（含结构化 cT）、划分、病理特征、CT ROI 特征、影像组学特征表。
 
@@ -641,6 +688,10 @@ def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dic
     - CT 缺失约 12%，单个 ROI 缺失少量；影像组学表只覆盖有分割的病例（约 70%）；
     - v3：``path_missing``（默认 0）比例的病例没有病理特征（清单 slide_path 为空），用独立的随机数生成，
       不改变其余数据（v2 测试结果不受影响）。
+    - v4：临床协变量（年龄、性别、ECOG、cN、cM）、治疗（新辅助 / 辅助化疗 / 一线方案 / 免疫及场景）、TRG / pCR
+      一律用另一个独立随机数生成，不改变已有列。``v4_effects: true``（默认 false）时再把以下已知效应写进生存时间：
+      ECOG 每增加 1 分风险 ×1.35；辅助化疗获益（log HR −0.2，高风险者再 −0.5，即"高风险获益更多"）；新辅助 log HR −0.2；
+      晚期"化疗 + 免疫"获益（log HR −0.1，MSI-H 再 −0.8）。pCR 概率与 MSI-H、肠型、含免疫方案相关。
     """
     import csv
 
@@ -660,6 +711,8 @@ def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dic
     rng = np.random.RandomState(int(fc.get("seed", 13)))
     p_miss = float(fc.get("path_missing", 0.0))
     rng_pm = np.random.RandomState(int(fc.get("seed", 13)) + 1000)
+    rng_v4 = np.random.RandomState(int(fc.get("seed", 13)) + 2000)
+    v4_effects = bool(fc.get("v4_effects", False))
     root = root_dir(cfg)
     out_dir = resolve_path(cfg, cfg.paths.output_dir).resolve()
     existing = [p for p in root.iterdir() if p.resolve() != out_dir] if root.exists() else []
@@ -692,6 +745,11 @@ def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dic
         base = 1 / 60.0 if pop == "resected" else 1 / 12.0
         t_ev = rng.exponential(1 / (base * np.exp(0.8 * zp + 0.8 * zc)))
         t_c = rng.uniform(6, 90)
+        clin = _fake_v4_clinical(rng_v4, pop, ti, msi, lauren, 0.8 * zp + 0.8 * zc)
+        if v4_effects:
+            t_ev = t_ev / np.exp(clin.pop("_loghr"))
+        else:
+            clin.pop("_loghr")
         os_m, os_e = min(t_ev, t_c), int(t_ev <= t_c)
         # ---- 病理 ----
         n = rng.randint(30, 120)
@@ -746,9 +804,10 @@ def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dic
                  msi=miss("MSI-H" if msi else "MSS"), ebv=miss("pos" if rng.rand() < 0.08 else "neg"),
                  pdl1_cps=miss(f"{rng.exponential(6):.0f}"), cldn182_pct=miss(f"{rng.uniform(0, 100):.0f}"),
                  label_source="biopsy", population=pop, os_months=f"{os_m:.1f}", os_event=str(os_e),
-                 neoadj="0", immuno="0", ct_t=miss(t_groups[ti], 0.08), ct_stage_source="report",
+                 ct_t=miss(t_groups[ti], 0.08), ct_stage_source="report",
                  ct_dir=("raw/ct/" + sid) if has_ct else "", tumor_visibility="clear",
                  slide_path=("raw/wsi/" + sid + ".svs") if has_path else "")
+        r.update(clin)
         if pop == "resected":
             r.update(dfs_months=f"{os_m * rng.uniform(0.5, 1):.1f}", dfs_event=str(int(os_e or rng.rand() < 0.2)))
         else:

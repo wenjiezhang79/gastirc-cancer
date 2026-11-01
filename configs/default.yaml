@@ -449,3 +449,43 @@ v3:
       margin: 0.05                     # 差值 95% CI 下限 ≥ −margin 即通过
   late:                                # 后期融合（两模态折外预测组合）
     penalty: 1.0e-3                    # 交叉拟合堆叠（逻辑回归 / 分层 Cox）的 L1 惩罚，很小，近似不惩罚
+
+# ============================================================
+# v4 评估统计（统计分析计划见 docs/decisions.md 第十五节；须在任何 --final 之前定稿）
+# ============================================================
+v4:
+  models:
+    main: fusion/fusion_main           # 主模型（<命名空间>/<实验名>）：其风险评分用于全部预后分析
+    compare: []                        # 对照模型，如 [path_mtl/uni2h_abmil, ct_mtl/ct_radimagenet, fusion/late_stack]
+  figure_language: en                  # 图中文字：en（默认，投稿用）/ zh（需服务器有中文字体，否则自动改用英文）；报告正文为中文
+  horizons_months: [12, 36, 60]
+  n_boot: 1000                         # bootstrap 次数（C-index、增量 C-index 等的 95% CI）
+  min_events: 30                       # 某一层事件数低于此值时只描述（KM 与生存率），不做检验
+  landmark_months: 3                   # "先活下来"偏倚的标志时间点分析
+  min_group_n: 30                      # 一线方案某类不足该例数时并入"化疗 + 其他"
+  classification_tasks: [lauren, her2_pos, msi_h, ebv_pos, pdl1_cps5, cldn182_pos]
+  calibration_bins: 10
+  cox_covariates:                      # 多因素 Cox 的协变量（risk_z = 风险评分每 1 个标准差）；按人群加入治疗变量
+    common: [risk_z, stage_group, age10, sex, ecog]
+    resected_treatment: [tx_pattern, immuno]
+    unresectable_treatment: [tx_firstline]
+  cox_strata: center                   # 合并多个中心时按中心分层
+  incremental:                         # 增量价值：临床模型 vs 临床 + 风险评分（系数在内部训练集上拟合后冻结）
+    clinical: [stage_group, age10, sex, ecog]
+  nomogram:
+    covariates: [stage_group, age10]   # 列线图 = 风险评分 + 这些变量
+  interactions:                        # 第 4 层探索：交互作用
+    treatments_resected: [adj_chemo, neoadj]
+    treatments_unresectable: [chemo_her2, chemo_io, chemo_cldn, none]
+    marker_by_treatment: {her2_pos: chemo_her2, msi_h: chemo_io, ebv_pos: chemo_io, pdl1_cps5: chemo_io, cldn182_pos: chemo_cldn}
+  neoadj:
+    endpoint: pcr                      # 主要终点；阳性不足 min_pos 时改用 mpr（TRG 0–1）
+    min_pos: 30
+    pcr_definition: "专家判定（具体定义待研究团队向专家确认：ypT0N0 或 ypT0）"
+  immuno:
+    min_events: 30
+    ps_covariates: [stage_group, age10, ecog, sex]
+    ps_trim: [0.01, 0.99]              # 倾向性评分截断
+  explain:
+    n_cases: 4                         # 每个任务、高 / 低各选几例画热图
+    tasks: [msi_h, lauren, os]
