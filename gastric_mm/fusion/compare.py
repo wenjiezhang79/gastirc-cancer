@@ -118,7 +118,18 @@ def _run(args) -> int:
     refs = {"main": _exp_dir(cfg, args.main, NAMESPACE), "path": _exp_dir(cfg, pname, "path_mtl"),
             "ct": _exp_dir(cfg, cname, "ct_mtl")}
     late = [_exp_dir(cfg, x.strip(), NAMESPACE) for x in (args.late or "").split(",") if x.strip()]
-    others = [_exp_dir(cfg, x.strip(), NAMESPACE) for x in (args.others or "").split(",") if x.strip()]
+    others, skipped = [], []
+    for x in (args.others or "").split(","):
+        if not x.strip():
+            continue
+        try:
+            others.append(_exp_dir(cfg, x.strip(), NAMESPACE))
+        except UserError:
+            if not args.skip_missing:
+                raise
+            skipped.append(x.strip())
+    if skipped:
+        log.info("以下对照实验尚未完成，已跳过：%s", ", ".join(skipped))
     if not late:
         raise UserError("没有指定后期融合实验（--late）", "判定规则要求同时与后期融合比较；请先运行 32_v3_late_fusion.sh。")
     models: Dict[str, Tuple[str, object]] = {"融合": refs["main"], "病理单模态": refs["path"], "CT 单模态": refs["ct"]}
@@ -243,8 +254,11 @@ def _run(args) -> int:
          f"- 融合：{refs['main'][0]}；病理单模态：{refs['path'][0]}；CT 单模态：{refs['ct'][0]}；"
          f"后期融合：{', '.join(l for l, _ in late)}" + (f"；对照：{', '.join(l for l, _ in others)}" if others else ""),
          f"- 共同病例：两种模态都有、且所有模型都有预测的 {len(common)} 例" + (f"（{lost} 例因缺某个模型的预测未纳入）" if lost else "")
-         + f"；配对 bootstrap {n_boot} 次（按病人重抽样）。", "",
-         "## 预先规定的判定规则（2026-11-01 确认，结果出来后不得修改）", "",
+         + f"；配对 bootstrap {n_boot} 次（按病人重抽样）。"]
+    if skipped:
+        L.append(f"- 尚未完成、未列入的对照：{', '.join(skipped)}")
+    L += ["",
+          "## 预先规定的判定规则（2026-11-01 确认，结果出来后不得修改）", "",
          f"- 主结论任务：{', '.join(primary)}；取各任务主要指标（宏平均 AUC / AUC / C-index）的平均。",
          "- 最佳单模态 = 每个任务取病理、CT 中较好者；后期融合 = 每个任务取各后期融合方法中较好者（均从保守出发）。",
          "- 融合 − 最佳单模态、融合 − 后期融合两个差值的 95% CI 下限都 > 0，才称“融合明显超过”。",
@@ -303,6 +317,7 @@ def main(argv=None) -> int:
     p.add_argument("--others", default=None, help="其他对照 / 消融实验，逗号分隔（默认在 fusion 下；也可写 path_mtl/<名>）")
     p.add_argument("--path-exp", default=None, help="v1 病理实验名（默认 v3.init.path_exp）")
     p.add_argument("--ct-exp", default=None, help="v2 CT 实验名（默认 v3.init.ct_exp）")
+    p.add_argument("--skip-missing", action="store_true", help="--others 中尚未完成的实验跳过（报告中注明），不报错")
     return run_main(_run, p, argv)
 
 

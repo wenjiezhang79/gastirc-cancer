@@ -149,7 +149,17 @@
   - 外部工具在测试与演示中用 `gastric_mm/fake_tools/` 的假命令代替；脚本 `20_`–`28_`、`run_v2_demo.sh`；离线准备 `docs/v2_offline_setup.md`
   - 待服务器验证：TotalSegmentator / nnU-Net / pyradiomics 环境；各 3D 编码器与 RadImageNet 用 3–5 例与官方代码核对；显存与速度
   - 已修复（2026-11-01，经研究者同意改动 v1 公共代码）：`metrics._clean` 等在某组某任务无标签时报错（如外部某中心没有不可切除患者 → 无 PFS），现返回 NaN；影响 v1 外部队列按中心报告，不改变任何已有结果
-- [ ] **v3 融合**：实现约定已于 2026-11-01 与研究者确认（`docs/decisions.md` 第十四节）；代码开发中
+- [x] **v3 融合**（2026-11-01 完成代码，假数据 CPU 测试通过；全部测试 146 项通过（Python 3.13 + pandas 3）；尚未在真实数据上运行。约定见 `docs/decisions.md` 第十四节）
+  - **三方共用内层验证名单**（`inner_val.py`，`split.inner_val_fraction`）：经研究者同意改动 v1 / v2 抽内层验证的一处代码；名单存于 `work/splits/inner_val/`，与重算结果不一致时报错
+  - 模态可用性检查（`fusion.check`）：逐例清单 + 缺失原因 + 按中心 / 人群汇总，不读标签
+  - 融合模型（`mtl/fusion_model.py`）：门控 ABMIL 病理 token + CT ROI token + CLS + 模态类型 / 槽位嵌入 → 小 Transformer；缺失屏蔽（可见作对照）；
+    拼接、门控双线性对照；单模态辅助头；分支冻结；保存 CLS 对各模态的注意力占比
+  - 训练（`fusion.train`）：v1 / v2 同种子同折初始化（分支 0.1 倍学习率），防泄漏 / 折号 / 内层验证名单 / 编码器一致性检查，模态丢弃，按模态可用性分层报告、缺失鲁棒性
+  - 后期融合（`fusion.late`：平均、交叉拟合堆叠）；比较报告（`fusion.compare`：预先规定的 5 任务平均判定 + MSI/EBV 非劣效）；最终评估（`fusion.predict --final`）
+  - 脚本 `30_`–`35_`、`run_v3_demo.sh`；`mtl/trainer` 增加可选钩子（分支学习率、冻结、辅助头、额外预测列），v2 行为不变
+  - 顺带修复：pandas 3 下 cT 为 TX 时 `ct_t34` 被误标为 0（应为缺失）
+  - 待讨论：假数据上融合读出层未能完全保留病理信号（冻结 v1 分支时 MSI AUC 0.87 vs v1 0.98），见 `docs/decisions.md` 第十四节第 13 小节
+  - 待服务器验证：真实数据上的显存、速度与指标
 - [ ] v4 评估统计
 
 ## 9. 评估规范
