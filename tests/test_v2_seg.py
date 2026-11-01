@@ -90,7 +90,7 @@ def test_ctnm_columns_and_ct_t34(fake_env):
     lab = derive_labels(res.df, cfg)
     assert lab.loc[0, "ct_t_group"] == "T1" and lab.loc[0, "ct_t34"] == 0
     assert lab.loc[1, "ct_t_group"] == "T4" and lab.loc[1, "ct_t34"] == 1   # 新辅助后的标本不影响治疗前 cT
-    assert lab.loc[2, "ct_t_group"] is None and np.isnan(lab.loc[2, "ct_t34"])
+    assert pd.isna(lab.loc[2, "ct_t_group"]) and np.isnan(lab.loc[2, "ct_t34"])   # pandas 3 中缺失字符串为 NaN
     raw.loc[4, "ct_t"] = "T5"
     assert validate_manifest(raw, cfg, check_paths=False).n_errors == 1
 

@@ -156,7 +156,8 @@ def derive_labels(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
 
     grp = _col(df, "ct_t").map(ct_t_group)
     out["ct_t_group"] = grp
-    out["ct_t34"] = grp.map(lambda g: np.nan if g is None else (1.0 if g in ("T3", "T4") else 0.0)).astype(float)
+    # 注意：pandas 3 中 map 返回的 None 会变成 NaN，因此用 pd.isna 判断缺失（否则 TX 会被误标为 cT1–2）
+    out["ct_t34"] = grp.map(lambda g: np.nan if g is None or pd.isna(g) else (1.0 if g in ("T3", "T4") else 0.0)).astype(float)
 
     # 标签来源屏蔽
     if not lc.get("use_post_neoadj", False):
