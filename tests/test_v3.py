@@ -13,7 +13,7 @@ import pytest
 import torch
 import yaml
 
-from gastric_mm.fusion import check, compare, late, predict, train
+from gastric_mm.fusion import check, compare, diagnose, late, predict, train
 from gastric_mm.utils.errors import UserError
 
 REPO = Path(__file__).resolve().parent.parent
@@ -470,3 +470,20 @@ def test_v1_v2_fingerprints_unaffected_by_v3(v3_env):
     cfg.v3["ct_encoder"] = "other"
     cfg.v3.train["modality_dropout"] = 0.5
     assert fp1(cfg) == a1 and fp2(cfg, "v2", "token") == a2
+
+
+# ---------------- 早停诊断 ----------------
+def test_diagnose_report(v3_trained):
+    env = v3_trained
+    assert env.run(diagnose.main, "--exps", "path_mtl/p,ct_mtl/c,f") == 0
+    run = sorted((env.out / "fusion_diagnose").iterdir())[-1]
+    d = pd.read_csv(run / "diagnose.csv")
+    assert set(d.experiment) == {"path_mtl/p", "ct_mtl/c", "fusion/f"}
+    assert {"lauren", "msi_h", "os"} <= set(d.task)
+    assert (d.task_best_epoch >= 0).all() and (d.task_best_epoch < d.n_epochs).all()
+    assert (d.excess >= -1e-12).all()                         # 停止时的损失不会低于该任务自己的最低点
+    # 与 done.json 中的最佳 epoch 一致
+    best = json.loads((env.exp("fusion", "f") / "seed0" / "fold0" / "done.json").read_text(encoding="utf-8"))["best_epoch"]
+    assert (d[(d.experiment == "fusion/f") & (d.fold == "fold0")].stop_epoch == best).all()
+    assert "早停诊断" in (run / "diagnose_report.md").read_text(encoding="utf-8")
+    assert env.run(diagnose.main, "--exps", "no_such_exp") == 1
