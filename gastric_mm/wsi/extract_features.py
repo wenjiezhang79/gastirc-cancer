@@ -22,6 +22,7 @@ from ..paths import WorkPaths
 from ..utils.cli import base_parser, parse_id_list, run_main
 from ..utils.errors import CaseError, UserError
 from ..utils.runio import Run
+from ..utils.device import resolve_device
 from ..utils.runner import exit_code, process_cases
 from .extractors import Extractor, build_extractor, output_name
 from .features_io import read_tiles, write_features
@@ -52,19 +53,6 @@ class TileDataset:
         if img.size != (self.out_px, self.out_px):
             img = img.resize((self.out_px, self.out_px), Image.BILINEAR)
         return self.transform(img)
-
-
-def resolve_device(gpu):
-    import torch
-
-    if gpu is None:
-        return torch.device("cpu")
-    if not torch.cuda.is_available():
-        raise UserError(f"指定了 --gpu {gpu}，但当前环境检测不到可用的 GPU",
-                        "请运行 nvidia-smi 确认 GPU 状态，或去掉 --gpu 改用 CPU。")
-    if gpu >= torch.cuda.device_count():
-        raise UserError(f"没有第 {gpu} 张 GPU（共 {torch.cuda.device_count()} 张）", "请用 --gpu 0 或 --gpu 1。")
-    return torch.device(f"cuda:{gpu}")
 
 
 def extract_slide(ext: Extractor, case: dict, cfg: Config, device, out_dir_name: str) -> dict:

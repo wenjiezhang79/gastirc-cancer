@@ -511,16 +511,126 @@ def generate(cfg: Config, logger=None, overwrite: bool = False) -> dict:
     return summary
 
 
+# ============================================================
+# v1 用：假特征队列（埋入已知信号，检验模型确实能学到东西）
+# ============================================================
+def generate_feature_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dict:
+    """直接生成假的病理特征（不生成切片/CT）、病例清单和划分文件。
+
+    埋入的信号：
+    - Lauren：每类在一个特征维度上偏移（部分切块）；
+    - MSI-H：约 40% 的切块在 3 个维度上明显偏移（模拟局部形态改变）；
+    - 预后：潜在风险 z 决定生存时间，并以较弱幅度体现在 2 个维度上；
+    - HER2：弱信号；EBV、PD-L1、Claudin18.2 无信号（检验模型不会凭空"学到"）。
+    """
+    import csv
+
+    from .manifest import validate_manifest, read_manifest_csv
+    from .labels import derive_labels
+    from .split import make_split
+    from .wsi.features_io import write_features
+
+    fc = cfg.fake_data.get("feature_cohort", {}) or {}
+    n_int = int(fc.get("n_internal", 200))
+    n_ext = int(fc.get("n_external", 60))
+    dims = dict(fc.get("encoders", {"uni2_h": 32, "conch_v15": 16}))
+    t_lo, t_hi = (int(v) for v in fc.get("tiles", [40, 200]))
+    k = float(fc.get("signal", 1.0))           # 信号强度倍数（测试用小队列时调高）
+    rng = np.random.RandomState(int(fc.get("seed", 11)))
+    root = root_dir(cfg)
+    out_dir = resolve_path(cfg, cfg.paths.output_dir).resolve()
+    existing = [p for p in root.iterdir() if p.resolve() != out_dir] if root.exists() else []
+    if existing and not (root / MARKER).exists():
+        raise UserError(f"目标目录 {root} 已有内容且不是假数据目录，拒绝写入。", "请把 paths.root 指向新的空目录。")
+    if existing and not overwrite:
+        raise UserError(f"假数据目录 {root} 已存在。", "如需重新生成，加 --overwrite。")
+    for p in existing:
+        shutil.rmtree(p) if p.is_dir() else p.unlink()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / MARKER).write_text("由 gastric_mm.fake_data 生成的假数据目录（特征队列）\n", encoding="utf-8")
+    wp = WorkPaths(cfg)
+    D0 = max(dims.values())
+    mix = {e: rng.normal(size=(D0, d)) / np.sqrt(D0) + (np.eye(D0, d) if d <= D0 else 0) for e, d in dims.items()}
+    # 维数越低的假编码器噪声越大（模拟“较弱”的编码器），便于检验比较流程
+    noise = {e: 0.1 if d >= D0 else 0.8 for e, d in dims.items()}
+
+    rows = []
+    centers = ["internal"] * n_int + [["ext1", "ext2", "ext3"][i % 3] for i in range(n_ext)]
+    counters = {}
+    for center in centers:
+        counters[center] = counters.get(center, 0) + 1
+        sid = f"{CENTER_PREFIX[center]}-{counters[center]:04d}"
+        lauren = int(rng.choice(3, p=[0.5, 0.35, 0.15]))
+        msi = int(rng.rand() < 0.15)
+        her2 = int(rng.rand() < 0.15)
+        z = rng.normal()
+        pop = "resected" if rng.rand() < 0.85 else "unresectable"
+        base = 1 / 60.0 if pop == "resected" else 1 / 12.0
+        t_ev = rng.exponential(1 / (base * np.exp(0.9 * z)))
+        t_c = rng.uniform(6, 90)
+        os_m, os_e = min(t_ev, t_c), int(t_ev <= t_c)
+        n = rng.randint(t_lo, t_hi + 1)
+        x = rng.normal(size=(n, D0)).astype(np.float32)
+        sel = rng.rand(n) < 0.5
+        x[sel, lauren] += 0.6 * k
+        if msi:
+            x[rng.rand(n) < 0.25, 3:6] += 0.9 * k
+        x[:, 6:8] += 0.5 * k * z
+        if her2:
+            x[rng.rand(n) < 0.3, 8] += 1.0 * k
+        coords = np.stack([np.arange(n) % 20 * 256, np.arange(n) // 20 * 256], 1)
+        for e, M_ in mix.items():
+            f = x @ M_ + noise[e] * rng.normal(size=(n, M_.shape[1]))
+            write_features(wp.wsi_features(e, sid), f.astype(np.float32), coords,
+                           {"encoder": e, "source": "fake"})
+        def miss(v, p=0.1):
+            return "" if rng.rand() < p else v
+        r = {c: "" for c in MANIFEST_COLUMNS}
+        r.update(
+            study_id=sid, center=center, lauren=miss(["intestinal", "diffuse", "mixed"][lauren]),
+            her2_ihc=miss("3+" if her2 else str(rng.choice(["0", "1+"]))), msi=miss("MSI-H" if msi else "MSS"),
+            ebv=miss("pos" if rng.rand() < 0.08 else "neg"), pdl1_cps=miss(f"{rng.exponential(6):.0f}"),
+            cldn182_pct=miss(f"{rng.uniform(0, 100):.0f}"), ki67_pct=miss(f"{rng.uniform(5, 90):.0f}"),
+            label_source="biopsy", population=pop, os_months=f"{os_m:.1f}", os_event=str(os_e),
+            neoadj="0", immuno="0",
+        )
+        if pop == "resected":
+            r.update(dfs_months=f"{os_m * rng.uniform(0.5, 1):.1f}", dfs_event=str(int(os_e or rng.rand() < 0.2)))
+        else:
+            r.update(pfs_months=f"{os_m * rng.uniform(0.3, 0.8):.1f}", pfs_event=str(int(os_e or rng.rand() < 0.5)))
+        rows.append(r)
+
+    mpath = resolve_path(cfg, cfg.paths.manifest)
+    mpath.parent.mkdir(parents=True, exist_ok=True)
+    with open(mpath, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=MANIFEST_COLUMNS)
+        w.writeheader()
+        w.writerows(rows)
+    res = validate_manifest(read_manifest_csv(mpath), cfg, check_paths=False)
+    split = make_split(derive_labels(res.df, cfg), cfg)
+    sp = wp.splits / f"split_seed{cfg.split.get('seed', cfg.get('seed'))}.csv"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    split.to_csv(sp, index=False)
+    if logger:
+        logger.info("假特征队列已生成：内部 %d 例、外部 %d 例，编码器 %s", n_int, n_ext, dims)
+    return {"n_internal": n_int, "n_external": n_ext, "encoders": dims}
+
+
 def _run(args) -> int:
     cfg = load_config(args.config, args.set)
     run = Run(cfg, "fake_data", args.run_name)
-    generate(cfg, run.logger, overwrite=args.overwrite)
+    if args.features_only:
+        generate_feature_cohort(cfg, run.logger, overwrite=args.overwrite)
+    else:
+        generate(cfg, run.logger, overwrite=args.overwrite)
     return 0
 
 
 def main(argv=None) -> int:
     p = base_parser("生成假的切片、CT、分割、TRIDENT 特征和病例清单（测试与演示用）。", cases=False, workers=False)
     p.add_argument("--overwrite", action="store_true", help="删除并重新生成已有的假数据目录")
+    p.add_argument("--features-only", action="store_true",
+                   help="只生成假特征队列（埋入已知信号，供 v1 模型测试与演示）")
     return run_main(_run, p, argv)
 
 

@@ -7,7 +7,7 @@
 - 方案决策汇总：`docs/decisions.md`
 - CT 标注规范（草稿）：`docs/ct_annotation_protocol.md`
 
-当前版本：**v0 数据层**（清单校验、标签派生、数据划分、CT 预处理、病理切块与特征、TRIDENT 特征导入）。
+当前版本：**v0 数据层** + **v1 病理多任务模型**（代码完成，尚未在真实数据上运行）。
 
 ---
 
@@ -52,13 +52,67 @@ CONFIG=configs/其他.yaml PYTHON=/path/to/env/bin/python bash scripts/03_ct_con
 
 退出码：0 = 全部成功；1 = 配置或数据需要处理（看提示）；2 = 程序内部错误（把 run.log 末尾贴回）；3 = 部分病例失败（见 status.csv）。
 
+## 二b、v1 病理多任务模型
+
+前提：已完成清单校验（01）、数据划分（01b）、TRIDENT 特征导入（05b）。v1 的参数都在配置的 `v1:` 一节。
+
+**1. 编码器初筛**（7 个编码器，只训练 Lauren + MSI，每个 3 个随机种子，按预先规定的指标排名）：
+
+```bash
+GPU=0 ENCODERS="uni2_h virchow2 conch_v15 musk" bash scripts/11_v1_compare_encoders.sh
+```
+
+```bash
+GPU=1 ENCODERS="gigapath chief_ctranspath resnet50_trunc" bash scripts/11_v1_compare_encoders.sh
+```
+
+两张卡都跑完后，汇总比较：
+
+```bash
+COMPARE_ONLY=1 bash scripts/11_v1_compare_encoders.sh
+```
+
+**2. 完整多任务模型**（选定编码器后；可以两张卡分折并行，同一个实验名）：
+
+```bash
+EXP=uni2h_abmil GPU=0 bash scripts/10_v1_train.sh --encoders uni2_h --folds 0,1,2
+```
+
+```bash
+EXP=uni2h_abmil GPU=1 bash scripts/10_v1_train.sh --encoders uni2_h --folds 3,4
+```
+
+**3. 消融实验**（单任务 vs 多任务、TransMIL、均值池化、固定权重、Cox）：
+
+```bash
+ENCODER=uni2_h GPU=0 bash scripts/13_v1_ablation.sh
+```
+
+**4. 最终评估**（模型定型后只做一次；不加 `--final` 不会运行，同一模型对同一队列重复运行会被拒绝）：
+
+```bash
+EXP=uni2h_abmil COHORT=test bash scripts/12_v1_predict.sh --final
+```
+
+| 输出（`outputs/path_mtl/<实验名>/`） | 内容 |
+|---|---|
+| `cv_report.md` | 交叉验证报告：各任务折外指标与 95% CI、各折均值 ± 标准差（可贴回） |
+| `oof_predictions.csv` | 每例折外预测（概率、风险评分、1/3/5 年生存概率）（不外传） |
+| `postprocess.json` | 由折外预测确定的阈值与风险分组截断值（之后冻结） |
+| `oof_attention.h5`、`oof_embeddings.h5` | 注意力（热图用）与病理 token（融合用） |
+| `seed*/fold*/` | 每个模型、训练曲线、病例分配 |
+| `_compare/<时间>/compare_report.md` | 编码器比较表（可贴回） |
+| `final_<队列>_<时间>/report.md` | 最终评估报告（可贴回） |
+
+先用假特征验证环境（CPU，约 2 分钟）：`bash scripts/run_v1_demo.sh`。
+
 ## 三、哪些可以贴回、哪些不能
 
 | 可以贴回（已确认只含 study_id） | **不能拷出服务器** |
 |---|---|
-| `env_report.md`、`validation_report.md`、`dicom_summary.md`、`split_report.md`、`trident_import_report.md`、`status.csv`、`run.log` | 任何 `private/` 目录（含原始文件名，可能带住院号） |
+| `env_report.md`、`validation_report.md`、`dicom_summary.md`、`split_report.md`、`trident_import_report.md`、`cv_report.md`、`compare_report.md`、最终评估 `report.md`、`status.csv`、`run.log` | 任何 `private/` 目录（含原始文件名，可能带住院号） |
 | | 质控图、总览图（是患者影像） |
-| | 清单本身、`labels_preview.csv`、划分文件 |
+| | 清单本身、`labels_preview.csv`、划分文件、`oof_predictions.csv`、`predictions.csv`（逐例结果） |
 
 贴回日志前请再扫一眼，确认没有姓名或住院号。程序在设计上不会把病人级路径写进日志，但第三方库的报错偶尔可能带出。
 
@@ -98,14 +152,17 @@ pip install --no-index --find-links wheels pydicom SimpleITK
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest            # 全部测试在 CPU 上用假数据运行，约 30 秒，测试中禁止联网
+python -m pytest            # 全部测试在 CPU 上用假数据运行，约 1 分钟，测试中禁止联网
 ```
 
 代码结构：
 
 ```
 gastric_mm/
-├── config.py  paths.py  manifest.py  labels.py  split.py  fake_data.py  env_check.py
+├── config.py  paths.py  manifest.py  labels.py  split.py  fake_data.py  env_check.py  metrics.py  losses.py
+├── models/   mil.py  heads.py  path_model.py
+├── training/ bag_dataset.py  survival_bins.py  task_spec.py  trainer.py
+├── path_mtl/ train.py  predict.py  compare.py  evaluate.py  common.py
 ├── ct/   dicom_io.py  summary.py  convert.py  transforms.py  import_points.py  transfer.py  crop.py  qc.py
 ├── wsi/  reader.py  tissue.py  tiling.py  extractors.py  extract_features.py  features_io.py  import_trident.py
 └── utils/ cli.py  errors.py  log.py  privacy.py  runio.py  runner.py

@@ -155,3 +155,60 @@ fake_data:
   ct_n_slices_5mm: 24
   trident_encoders: {uni_v2: 1536, conch_v15: 768}
   trident_patch_px: 256
+  feature_cohort:                  # --features-only：v1 测试/演示用的假特征队列
+    n_internal: 200
+    n_external: 60
+    encoders: {uni2_h: 32, conch_v15: 16}
+    tiles: [40, 200]
+    signal: 1.0                    # 埋入信号的强度倍数
+    seed: 11
+
+# ---------------- v1 病理多任务模型 ----------------
+v1:
+  encoders: [uni2_h]               # 使用的病理特征（TRIDENT 导入后的编码器名）；写多个表示逐切块拼接
+  feature_cache: true              # 特征以 float16 缓存在内存中（约 6 GB / 2000 例）；内存不足时设为 false
+  model:
+    aggregator: abmil              # abmil（主方案）/ transmil（对照）/ meanpool（简单基线）
+    hidden_dim: 256
+    attn_dim: 128
+    n_branches: 2                  # ABMIL 注意力分支数 = 病理 token 数
+    dropout: 0.25
+    transmil_heads: 4
+  tasks:
+    multiclass: [lauren]           # 可加 her2_3cls
+    binary: [her2_pos, msi_h, ebv_pos, pdl1_cps1, pdl1_cps5, pdl1_cps10, cldn182_pos]
+    regression: []                 # 可加 ki67_frac
+    survival: [os, dfs, pfs]
+  population_baselines: [os]       # 这些终点按手术/不可切除人群分别设基线风险（共享风险评分）
+  loss:
+    weighting: uncertainty         # uncertainty（不确定性加权）/ fixed（固定权重）
+    fixed_weights: {}              # 固定权重，如 {msi_h: 2.0}；未列出的为 1；也用于早停监测
+    max_pos_weight: 10             # 二分类正样本权重上限（权重 = 阴性数/阳性数）
+    lauren_class_weight: false
+    survival_loss: discrete        # discrete（离散时间，主方案）/ cox（对照）
+    survival_bins: 4               # 每个终点、每个人群的时间段数（按事件时间分位数）
+  train:
+    epochs: 50
+    batch_size: 8
+    lr: 2.0e-4
+    weight_decay: 1.0e-4
+    warmup_epochs: 2
+    grad_clip: 1.0
+    grad_accum: 1
+    max_tiles: 2048                # 训练时每例最多随机抽取的切块数（评估时用全部）
+    tile_dropout: 0.1              # 训练时随机丢弃的切块比例
+    inner_val_fraction: 0.15       # 内层验证集比例（用于早停；留出折不参与任何训练决策）
+    patience: 10                   # 内层验证损失连续多少个 epoch 不下降则停止
+    num_workers: 0
+    precision: bf16                # GPU 上 bf16 混合精度；CPU 自动 fp32
+  seeds: [0]
+  horizons_months: [12, 36, 60]    # 输出这些时间点的生存概率
+  save_attention: true
+  eval:
+    n_boot: 1000                   # bootstrap 次数
+  compare:
+    primary: [lauren, msi_h]       # 编码器比较的排名指标：这些任务主要指标的平均（预先规定）
+  profiles:
+    screening:                     # 编码器初筛：只训练 Lauren + MSI，3 个随机种子，其余超参数固定
+      tasks: {multiclass: [lauren], binary: [msi_h], regression: [], survival: []}
+      seeds: [0, 1, 2]
