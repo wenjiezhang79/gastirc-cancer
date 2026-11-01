@@ -7,7 +7,7 @@
 - 方案决策汇总：`docs/decisions.md`
 - CT 标注规范（草稿）：`docs/ct_annotation_protocol.md`
 
-当前版本：**v0 数据层** + **v1 病理多任务模型** + **v2 CT 分支**（代码完成，尚未在真实数据上运行）。
+当前版本：**v0 数据层** + **v1 病理多任务模型** + **v2 CT 分支** + **v3 融合**（代码完成，尚未在真实数据上运行）。
 
 - v2 外部工具与权重的离线准备：`docs/v2_offline_setup.md`
 
@@ -184,6 +184,35 @@ EXP=ct_radimagenet ENCODER=radimagenet_r50 GPU=0 bash scripts/26_v2_train.sh --f
 
 先用假数据验证环境（CPU，约 3 分钟）：`bash scripts/run_v2_demo.sh`。
 
+## 二d、v3 融合（病理 + CT）
+
+前提：v1 病理、v2 CT 的编码器已选定，且各自的最终实验已用**同一划分、同样的随机种子**训练完成。
+在配置 `v3:` 一节填写 `path_encoders`、`ct_encoder` 与 `init.path_exp` / `init.ct_exp`（v1、v2 的实验名）。
+实现约定（缺失模态屏蔽、分支微调、三方共用内层验证名单、预先规定的判定规则）见 `docs/decisions.md` 第十四节。
+
+| 步骤 | 脚本 | 做什么 | 结果 |
+|---|---|---|---|
+| 1 | `30_v3_check.sh` | 模态可用性检查：每例有哪些模态、缺失原因，按中心 / 人群汇总（不读标签） | `outputs/fusion_check/<时间>/availability_report.md`（可贴回） |
+| 2 | `31_v3_train.sh` | 融合模型交叉验证（从 v1 / v2 同种子同折模型初始化，含防泄漏检查） | `outputs/fusion/<实验名>/cv_report.md`（可贴回） |
+| 3 | `32_v3_late_fusion.sh` | 后期融合对照（平均 / 交叉拟合堆叠），无需 GPU | `outputs/fusion/late_mean/`、`late_stack/` |
+| 4 | `33_v3_ablation.sh` | 消融全套（拼接、双线性、可见缺失、维数 / 层数、模态丢弃、冻结 / 从头训练、固定权重、辅助头、只用肿瘤 ROI、单任务） | `outputs/fusion/abl_*`、`st_*` |
+| 5 | `34_v3_compare.sh` | 比较报告：按预先规定的规则判定融合是否明显超过最佳单模态与后期融合 | `outputs/fusion_compare/<时间>/compare_report.md`（可贴回） |
+| 诊断 | `36_v3_diagnose.sh` | 早停诊断：各任务自己最好的 epoch vs 实际停止（只读训练记录；说明见 `docs/v3_diagnosis.md`） | `outputs/fusion_diagnose/<时间>/diagnose_report.md`（可贴回） |
+| 6 | `35_v3_predict.sh` | 最终评估（定型后只运行一次；外部按中心 + 合并，按模态可用性分层） | `final_<队列>_<时间>/report.md` |
+
+```bash
+bash scripts/30_v3_check.sh
+EXP=fusion_main GPU=0 bash scripts/31_v3_train.sh --folds 0,1,2     # 两张卡并行
+EXP=fusion_main GPU=1 bash scripts/31_v3_train.sh --folds 3,4
+bash scripts/32_v3_late_fusion.sh
+GPU=0 PART=1 bash scripts/33_v3_ablation.sh                          # 两张卡分担消融
+GPU=1 PART=2 bash scripts/33_v3_ablation.sh
+MAIN=fusion_main bash scripts/34_v3_compare.sh
+```
+
+注意：内层验证（早停）名单由 v1 / v2 / v3 三方共用（`work/splits/inner_val/`，第一次训练时自动生成）；
+若划分被重新生成，程序会报错并提示需要重跑的实验。先用假数据验证环境（CPU，约 5 分钟）：`bash scripts/run_v3_demo.sh`。
+
 ## 三、哪些可以贴回、哪些不能
 
 | 可以贴回（已确认只含 study_id） | **不能拷出服务器** |
@@ -240,12 +269,13 @@ python -m pytest            # 全部测试在 CPU 上用假数据运行，约 1 
 
 ```
 gastric_mm/
-├── config.py  paths.py  manifest.py  labels.py  split.py  fake_data.py  env_check.py  metrics.py  losses.py
+├── config.py  paths.py  manifest.py  labels.py  split.py  inner_val.py  fake_data.py  env_check.py  metrics.py  losses.py
 ├── models/   mil.py  heads.py  path_model.py
 ├── training/ bag_dataset.py  survival_bins.py  task_spec.py  trainer.py
 ├── path_mtl/ train.py  predict.py  compare.py  evaluate.py  common.py
-├── mtl/      data.py  model.py  trainer.py  experiment.py  spec.py      （通用 token 多任务框架，v2/v3 共用）
+├── mtl/      data.py  model.py  fusion_model.py  trainer.py  experiment.py  spec.py （通用 token 多任务框架，v2/v3 共用）
 ├── ct_mtl/   train.py  predict.py  compare.py  radiomics_model.py  linear.py
+├── fusion/   check.py  train.py  late.py  compare.py  predict.py  diagnose.py  common.py   （v3 融合；模型在 mtl/fusion_model.py）
 ├── fake_tools/ totalseg.py  nnunet_predict.py                         （测试与演示用的假外部工具）
 ├── ct/   dicom_io.py  summary.py  convert.py  transforms.py  import_points.py  transfer.py  crop.py  qc.py
 │         external.py  stomach_seg.py  seg_sample.py  nnunet_data.py  tumor_post.py  import_reviewed.py

@@ -1,0 +1,32 @@
+# v3 假特征演示配置：bash scripts/run_v3_demo.sh 使用（全部为假数据）。
+_base_: default.yaml
+
+paths:
+  root: data/fake_v3
+  manifest: manifest.csv
+  work_dir: work
+  output_dir: outputs
+
+fake_data:
+  mm_cohort:
+    n_internal: 300
+    n_external: 60
+    path_missing: 0.06               # 少量病例没有病理（检验"只有 CT"的处理）
+
+v1:
+  encoders: [uni2_h]
+  train: {epochs: 30, patience: 8}
+  eval: {n_boot: 200}
+
+v2:
+  encoder: fake_ct_a
+  train: {epochs: 30, batch_size: 16, patience: 8}
+  eval: {n_boot: 200}
+
+v3:
+  path_encoders: [uni2_h]
+  ct_encoder: fake_ct_a
+  init: {path_exp: demo_path, ct_exp: demo_ct}
+  train: {epochs: 30, patience: 8}
+  eval: {n_boot: 200}
+  compare: {n_boot: 300}

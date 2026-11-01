@@ -1,7 +1,7 @@
 """v2 CT 单模态多任务模型：交叉验证训练（只用内部训练集）。
 
 输入：④ 提取的 CT 特征 ``<work_dir>/ct/features/<编码器>/<study_id>.h5``（tumor / regional 两个 ROI token）。
-每个（随机种子, 折）：训练部分 = 其余各折，再分层抽 v2.train.inner_val_fraction（默认 15%）作内层验证用于早停；
+每个（随机种子, 折）：训练部分 = 其余各折，其中属于共用内层验证名单（v1/v2/v3 三方共用，见 gastric_mm/inner_val.py）的病例作内层验证用于早停；
 留出折只用于折外预测。内部测试集与外部队列在这里根本不会被读取。
 
 命令行：
@@ -23,7 +23,8 @@ import numpy as np
 
 from ..config import load_config
 from ..mtl.data import CTFeatureStore
-from ..mtl.experiment import aggregate, apply_profile, inner_split, open_experiment, save_attention
+from ..inner_val import SharedInnerVal
+from ..mtl.experiment import aggregate, apply_profile, open_experiment, save_attention
 from ..mtl.model import TokenMTLModel, save_token_model
 from ..mtl.spec import spec_from_section
 from ..mtl.trainer import predict, train_one
@@ -41,11 +42,11 @@ def describe(meta: dict):
             f"层聚合：{meta.get('aggregator')}；预设：{meta.get('profile') or '无'}"]
 
 
-def run_fold(cfg, spec, store, pool, fold, seed, fold_dir: Path, device, logger) -> None:
+def run_fold(cfg, spec, store, pool, fold, seed, fold_dir: Path, device, logger, inner_val: SharedInnerVal) -> None:
     sec = cfg[SECTION]
     held = pool[pool["fold"] == fold].reset_index(drop=True)
     rest = pool[pool["fold"] != fold].reset_index(drop=True)
-    is_val = inner_split(rest, cfg, float(sec.train.get("inner_val_fraction", 0.15)), seed * 100 + fold)
+    is_val = inner_val.mask(rest, seed, fold)
     lab_tr, lab_va = rest[~is_val].reset_index(drop=True), rest[is_val].reset_index(drop=True)
     prefix = f"[seed{seed} fold{fold}]"
     logger.info("%s 训练 %d 例，内层验证 %d 例，留出折 %d 例", prefix, len(lab_tr), len(lab_va), len(held))
@@ -105,6 +106,7 @@ def _run(args) -> int:
     if bad:
         raise UserError(f"折号 {bad} 无效（划分文件共 {n_folds} 折，编号 0–{n_folds - 1}）")
     device = resolve_device(args.gpu)
+    inner_val = SharedInnerVal(cfg, train_ids, log)
     log.info("设备：%s；折：%s；种子：%s", device, folds, seeds)
     for s in seeds:
         for k in folds:
@@ -112,7 +114,7 @@ def _run(args) -> int:
             if (fd / "done.json").exists() and not args.overwrite:
                 log.info("[seed%d fold%d] 已完成，跳过（--overwrite 可重跑）", s, k)
                 continue
-            run_fold(cfg, spec, store, pool, k, s, fd, device, log)
+            run_fold(cfg, spec, store, pool, k, s, fd, device, log, inner_val)
     all_seeds = sorted({int(p.name[4:]) for p in exp.glob("seed*") if p.is_dir()} | set(seeds))
     if not args.no_aggregate:
         aggregate(exp, cfg, SECTION, spec, pool, all_seeds, n_folds, log, describe)

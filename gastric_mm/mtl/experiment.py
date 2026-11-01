@@ -22,7 +22,6 @@ import pandas as pd
 from .. import metrics as M
 from ..config import Config, _to_config, deep_merge, resolve_path, save_config
 from ..path_mtl.evaluate import evaluate, merged, metrics_table_md, primary_value
-from ..split import _stratum_keys, greedy_assign
 from ..training.task_spec import TaskSpec
 from ..utils.errors import UserError
 from ..utils.log import setup_logging
@@ -31,7 +30,7 @@ from ..utils.runio import git_commit, package_versions
 NAME_RE_STR = r"^[A-Za-z0-9_.\-]+$"
 # 不影响结果、允许在同一实验中修改的配置项（v2 节中的提取/分割/比较/评估等）
 RUNTIME_KEYS = ("seeds", "feature_cache", "save_attention", "compare", "eval", "profiles", "external", "stomach",
-                "seg_sample", "tumor_seg", "features")
+                "seg_sample", "tumor_seg", "features", "late")
 
 
 def apply_profile(cfg: Config, section: str, profile: Optional[str]) -> Config:
@@ -92,10 +91,7 @@ def read_meta(exp: Path) -> dict:
     return json.loads((exp / "experiment.json").read_text(encoding="utf-8"))
 
 
-def inner_split(lab: pd.DataFrame, cfg: Config, frac: float, seed: int) -> np.ndarray:
-    """训练部分内分出内层验证集（按 split.stratify_by 分层）。True = 内层验证。"""
-    keys = _stratum_keys(lab.reset_index(drop=True), list(cfg.split.stratify_by))
-    return greedy_assign(keys, [1 - frac, frac], np.random.RandomState(seed)) == 1
+# 内层验证名单：见 gastric_mm/inner_val.py（v1 / v2 / v3 三方共用）
 
 
 def safe_evaluate(df: pd.DataFrame, spec: TaskSpec, cfg: Config, **kw) -> List[dict]:

@@ -638,7 +638,9 @@ def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dic
     - cT 分期由 z_c 决定（CT 区域 ROI 中体现）；
     - Lauren：病理与 CT 肿瘤 ROI 中都有（CT 较弱）；MSI-H 只在病理中；
     - 维数越低的假 CT 编码器噪声越大（模拟"较弱"的编码器）；EBV、PD-L1、Claudin18.2 无信号；
-    - CT 缺失约 12%，单个 ROI 缺失少量；影像组学表只覆盖有分割的病例（约 70%）。
+    - CT 缺失约 12%，单个 ROI 缺失少量；影像组学表只覆盖有分割的病例（约 70%）；
+    - v3：``path_missing``（默认 0）比例的病例没有病理特征（清单 slide_path 为空），用独立的随机数生成，
+      不改变其余数据（v2 测试结果不受影响）。
     """
     import csv
 
@@ -656,6 +658,8 @@ def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dic
     k = float(fc.get("signal", 1.0))
     rad_name = str(fc.get("radiomics_name", cfg.get_path("v2.radiomics.name", "original_bw25")))
     rng = np.random.RandomState(int(fc.get("seed", 13)))
+    p_miss = float(fc.get("path_missing", 0.0))
+    rng_pm = np.random.RandomState(int(fc.get("seed", 13)) + 1000)
     root = root_dir(cfg)
     out_dir = resolve_path(cfg, cfg.paths.output_dir).resolve()
     existing = [p for p in root.iterdir() if p.resolve() != out_dir] if root.exists() else []
@@ -697,8 +701,12 @@ def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dic
             x[rng.rand(n) < 0.3, 3:6] += 0.9 * k
         x[:, 6:8] += 0.5 * k * zp
         coords = np.stack([np.arange(n) % 20 * 256, np.arange(n) // 20 * 256], 1)
+        has_path = not (p_miss > 0 and rng_pm.rand() < p_miss)
         for e, Mx in mix_p.items():
-            write_features(wp.wsi_features(e, sid), (x @ Mx + 0.1 * rng.normal(size=(n, Mx.shape[1]))).astype(np.float32),
+            feats_p = (x @ Mx + 0.1 * rng.normal(size=(n, Mx.shape[1]))).astype(np.float32)
+            if not has_path:
+                continue
+            write_features(wp.wsi_features(e, sid), feats_p,
                            coords, {"encoder": e, "source": "fake"})
         # ---- CT ----
         has_ct = rng.rand() > 0.12
@@ -739,7 +747,8 @@ def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dic
                  pdl1_cps=miss(f"{rng.exponential(6):.0f}"), cldn182_pct=miss(f"{rng.uniform(0, 100):.0f}"),
                  label_source="biopsy", population=pop, os_months=f"{os_m:.1f}", os_event=str(os_e),
                  neoadj="0", immuno="0", ct_t=miss(t_groups[ti], 0.08), ct_stage_source="report",
-                 ct_dir=("raw/ct/" + sid) if has_ct else "", tumor_visibility="clear")
+                 ct_dir=("raw/ct/" + sid) if has_ct else "", tumor_visibility="clear",
+                 slide_path=("raw/wsi/" + sid + ".svs") if has_path else "")
         if pop == "resected":
             r.update(dfs_months=f"{os_m * rng.uniform(0.5, 1):.1f}", dfs_event=str(int(os_e or rng.rand() < 0.2)))
         else:

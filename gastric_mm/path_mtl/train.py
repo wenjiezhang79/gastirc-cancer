@@ -2,7 +2,8 @@
 
 只使用划分文件中 set=train 的病例（内部测试集、外部队列在这里根本不会被读取）。
 每个（随机种子, 折）：
-  训练部分 = 其余各折；从中再按分层抽 v1.train.inner_val_fraction（默认 15%）作内层验证用于早停；
+  训练部分 = 其余各折；其中属于共用内层验证名单（gastric_mm/inner_val.py，v1/v2/v3 三方共用，
+  按 split.inner_val_fraction 默认 15%）的病例作内层验证用于早停；
   被留出的那一折只用于折外预测，不参与任何训练决策。
 
 命令行：
@@ -27,7 +28,7 @@ import pandas as pd
 
 from .. import metrics as M
 from ..config import Config, load_config
-from ..split import _stratum_keys, greedy_assign
+from ..inner_val import SharedInnerVal
 from ..training.bag_dataset import FeatureStore
 from ..training.task_spec import TaskSpec
 from ..training.trainer import predict, train_one
@@ -40,14 +41,6 @@ from .common import apply_profile, load_labels_and_split, open_experiment, parse
 from .evaluate import evaluate, merged, metrics_table_md
 
 
-def inner_split(lab: pd.DataFrame, cfg: Config, seed: int) -> np.ndarray:
-    """训练部分内再分出内层验证集（分层）。返回布尔数组：True = 内层验证。"""
-    frac = float(cfg.v1.train.get("inner_val_fraction", 0.15))
-    keys = _stratum_keys(lab.reset_index(drop=True), list(cfg.split.stratify_by))
-    grp = greedy_assign(keys, [1 - frac, frac], np.random.RandomState(seed))
-    return grp == 1
-
-
 def save_attention(path: Path, attn: Dict[str, np.ndarray]) -> None:
     import h5py
     tmp = path.with_suffix(".tmp")
@@ -58,10 +51,10 @@ def save_attention(path: Path, attn: Dict[str, np.ndarray]) -> None:
 
 
 def run_fold(cfg: Config, spec: TaskSpec, store: FeatureStore, pool: pd.DataFrame, fold: int, seed: int,
-             fold_dir: Path, device, logger) -> None:
+             fold_dir: Path, device, logger, inner_val: SharedInnerVal) -> None:
     held = pool[pool["fold"] == fold].reset_index(drop=True)
     rest = pool[pool["fold"] != fold].reset_index(drop=True)
-    is_val = inner_split(rest, cfg, seed * 100 + fold)
+    is_val = inner_val.mask(rest, seed, fold)
     lab_tr, lab_va = rest[~is_val].reset_index(drop=True), rest[is_val].reset_index(drop=True)
     prefix = f"[seed{seed} fold{fold}]"
     logger.info("%s 训练 %d 例，内层验证 %d 例，留出折 %d 例", prefix, len(lab_tr), len(lab_va), len(held))
@@ -215,13 +208,14 @@ def _run(args) -> int:
         raise UserError(f"折号 {bad} 无效（划分文件共 {n_folds} 折，编号 0–{n_folds - 1}）")
     device = resolve_device(args.gpu)
     log.info("设备：%s；折：%s；种子：%s", device, folds, seeds)
+    inner_val = SharedInnerVal(cfg, train_ids, log)
     for s in seeds:
         for k in folds:
             fd = exp / f"seed{s}" / f"fold{k}"
             if (fd / "done.json").exists() and not args.overwrite:
                 log.info("[seed%d fold%d] 已完成，跳过（--overwrite 可重跑）", s, k)
                 continue
-            run_fold(cfg, spec, store, pool, k, s, fd, device, log)
+            run_fold(cfg, spec, store, pool, k, s, fd, device, log, inner_val)
     all_seeds = sorted({int(p.name[4:]) for p in exp.glob("seed*") if p.is_dir()} | set(seeds))
     if not args.no_aggregate:
         aggregate(exp, cfg, spec, pool, all_seeds, n_folds, log)

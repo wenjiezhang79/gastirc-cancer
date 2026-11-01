@@ -38,6 +38,9 @@ split:
   seed: 2026
   # 分层变量：每个变量分别在训练/测试、各折之间保持均衡（迭代分层，稀有阳性也能均匀分布）
   stratify_by: [lauren, msi_h, ebv_pos, her2_pos]
+  # 内层验证（早停用）比例：每个（随机种子, 留出折）在整个内部训练集的训练部分中分层抽取，
+  # 名单保存在 <work_dir>/splits/inner_val/，v1 / v2 / v3 三方共用（见 docs/decisions.md 第十四节第 5 小节）
+  inner_val_fraction: 0.15
 
 # ---------------- CT ----------------
 ct:
@@ -197,7 +200,6 @@ v1:
     grad_accum: 1
     max_tiles: 2048                # 训练时每例最多随机抽取的切块数（评估时用全部）
     tile_dropout: 0.1              # 训练时随机丢弃的切块比例
-    inner_val_fraction: 0.15       # 内层验证集比例（用于早停；留出折不参与任何训练决策）
     patience: 10                   # 内层验证损失连续多少个 epoch 不下降则停止
     num_workers: 0
     precision: bf16                # GPU 上 bf16 混合精度；CPU 自动 fp32
@@ -359,7 +361,6 @@ v2:
     grad_accum: 1
     slice_dropout: 0.1                 # 训练时随机丢弃的层比例（2.5D）
     roi_dropout: 0.1                   # 训练时随机丢弃一个 ROI token 的概率（另一个保留）
-    inner_val_fraction: 0.15
     patience: 10
     num_workers: 0
     precision: bf16
@@ -375,3 +376,76 @@ v2:
     screening:                         # CT 编码器初筛：Lauren + OS（+ cT 辅助头），3 个随机种子，其余超参数固定
       tasks: {multiclass: [lauren], binary: [ct_t34], regression: [], survival: [os]}
       seeds: [0, 1, 2]
+
+# ============================================================
+# v3 融合：病理 + CT 跨模态 Transformer（实现约定见 docs/decisions.md 第十四节，2026-11-01 确认）
+# ============================================================
+v3:
+  path_encoders: [uni2_h]              # 与 v1 选定的病理编码器一致（多个表示逐切块拼接）
+  ct_encoder: radimagenet_r50          # 与 v2 选定的 CT 编码器一致
+  ct_rois: [tumor, regional]           # 使用的 CT ROI；消融④只用肿瘤 ROI：[tumor]
+  feature_cache: true
+  init:                                # 单模态初始化（CLAUDE.md 6.5 第 15 条）：同种子、同折的 v1 / v2 模型
+    path_exp: null                     # v1 实验名（outputs/path_mtl/<名>）；null = 病理分支从头训练
+    ct_exp: null                       # v2 实验名（outputs/ct_mtl/<名>）；null = CT 分支从头训练
+  model:
+    fusion: transformer                # transformer（主模型）/ concat（简单拼接）/ bilinear（门控双线性，Pathomic 式）
+    missing: mask                      # mask（主方案：缺失槽位不参与注意力）/ visible（对照：占位 token 参与注意力）
+    skip: true                         # 直通路径（主方案）：输出头同时读取 CLS 与各模态自己的池化 token；false 为消融
+    d_model: 128
+    n_layers: 1
+    n_heads: 4
+    dropout: 0.25
+    bilinear_dim: 32                   # bilinear：外积前每个模态降到的维数
+    aux_heads: false                   # 消融①：单模态辅助头
+    aux_weight: 0.3                    # 辅助头损失权重
+    # 分支结构：从 v1 / v2 初始化时自动取其模型文件中的结构（以下设置只在"从头训练"时使用）
+    path: {aggregator: abmil, hidden_dim: 256, attn_dim: 128, n_branches: 2, dropout: 0.25}
+    ct: {aggregator: abmil, hidden_dim: 256, attn_dim: 128, dropout: 0.25}
+  tasks:
+    multiclass: [lauren]
+    binary: [her2_pos, msi_h, ebv_pos, pdl1_cps1, pdl1_cps5, pdl1_cps10, cldn182_pos]
+    regression: []
+    survival: [os, dfs, pfs]
+  population_baselines: [os]
+  loss:
+    weighting: uncertainty
+    fixed_weights: {}
+    max_pos_weight: 10
+    lauren_class_weight: false
+    survival_loss: discrete
+    survival_bins: 4
+  train:
+    epochs: 50
+    batch_size: 8
+    lr: 2.0e-4                         # 融合层与输出头的学习率
+    branch_lr_mult: 0.1                # 分支学习率 = lr × 该值（主方案：从 v1/v2 初始化后小学习率微调）
+    freeze_branches: false             # 消融：冻结分支（直接用 v1/v2 的 token，只训练融合层）
+    freeze_epochs: 0                   # 前若干 epoch 冻结分支（0 = 不冻结）
+    weight_decay: 1.0e-4
+    warmup_epochs: 2
+    grad_clip: 1.0
+    grad_accum: 1
+    modality_dropout: 0.3              # 两种模态都有的训练病例，以该概率随机遮住其中一种（永远不会两种都遮）
+    roi_dropout: 0.1                   # CT 内部随机丢弃一个 ROI（同 v2）
+    slice_dropout: 0.1                 # CT 2.5D 层丢弃（同 v2）
+    max_tiles: 2048                    # 病理每例训练时最多随机抽取的切块数（同 v1）
+    tile_dropout: 0.1
+    patience: 10                       # 内层验证（三方共用名单，见 split.inner_val_fraction）损失连续多少 epoch 不降则停
+    num_workers: 0
+    precision: bf16
+  seeds: [0]                           # 沿用 v1 / v2 最终实验的种子（每个种子都要有对应的 v1 / v2 模型）
+  horizons_months: [12, 36, 60]
+  save_attention: true
+  eval:
+    n_boot: 1000
+    missing_robustness: true           # 折外预测时，对两种都有的病例另外人为去掉 CT / 病理各预测一次
+  compare:                             # 预先规定的判定规则（2026-11-01 与研究者确认，结果出来后不得修改）
+    primary: [lauren, her2_pos, pdl1_cps5, cldn182_pos, os]   # 主结论：这 5 个任务主要指标的平均
+    population: both                   # 主判定只用两种模态都有的病例（全部病例另报）
+    n_boot: 2000                       # 配对 bootstrap 次数（按病人重抽样）
+    noninferiority:                    # MSI、EBV：不进主结论，检查融合相对病理单模态"没有明显变差"
+      tasks: [msi_h, ebv_pos]
+      margin: 0.05                     # 差值 95% CI 下限 ≥ −margin 即通过
+  late:                                # 后期融合（两模态折外预测组合）
+    penalty: 1.0e-3                    # 交叉拟合堆叠（逻辑回归 / 分层 Cox）的 L1 惩罚，很小，近似不惩罚
