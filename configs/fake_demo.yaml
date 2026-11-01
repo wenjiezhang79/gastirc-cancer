@@ -1,0 +1,36 @@
+# 假数据演示配置：bash scripts/run_v0_demo.sh 使用。全部数据由假数据生成器产生。
+_base_: default.yaml
+
+paths:
+  root: data/fake_demo
+  manifest: manifest.csv
+  work_dir: work
+  output_dir: outputs
+
+num_workers: 2
+
+trident:
+  job_dir: trident
+
+ct:
+  target_spacing: [1.5, 1.5, 5.0]
+  save_thin_series: true
+  crop:
+    specs:
+      - name: tumor_small
+        center: point_or_mask
+        spacing: [1.5, 1.5, 5.0]
+        size_vox: [48, 48, 12]
+        window: {level: 40, width: 400}
+        normalize: minmax
+      - name: regional_small
+        center: point_or_mask
+        spacing: [1.5, 1.5, 5.0]
+        size_vox: [96, 96, 20]
+        window: {level: 40, width: 400}
+        normalize: minmax
+
+features:
+  extractor: random_small
+  batch_size: 16
+  num_workers: 0

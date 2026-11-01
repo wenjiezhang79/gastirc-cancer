@@ -31,3 +31,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .DS_Store
+
+# ===== 本地配置与运行产物 =====
+configs/server.yaml
+.torch_offline_home/

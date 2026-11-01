@@ -1,0 +1,214 @@
+# ============================================================
+# 默认配置（全部参数及说明）。不要直接修改本文件：
+#   服务器上复制 configs/server_example.yaml 为 configs/server.yaml，只改需要改的项。
+# 路径规则：paths.root 为相对路径时相对于本仓库根目录；其余相对路径相对于 paths.root。
+# ============================================================
+
+seed: 2026            # 全局随机种子
+num_workers: 4        # 逐病例处理的并行进程数（命令行 --num-workers 可覆盖）
+
+paths:
+  root: data                    # 数据根目录
+  manifest: manifest.csv        # 病例清单（每行一个病人）
+  work_dir: work                # 处理结果（NIfTI、裁剪、切块坐标、特征）
+  output_dir: ../outputs        # 每次运行的日志、配置、报告
+
+# ---------------- 病例清单 ----------------
+manifest:
+  study_id_pattern: '^C\d+-\d+$'   # 研究编号格式，如 C1-0001
+  centers: [internal, ext1, ext2, ext3]
+  internal_center: internal
+  check_paths: true                # 校验切片、CT 文件夹、分割文件是否存在
+  strict_paths: false              # true：路径不存在算错误；false：算警告，该模态按缺失处理
+  max_os_months: 240               # 随访月数超过该值时警告（可能单位填错）
+
+# ---------------- 训练标签派生规则 ----------------
+labels:
+  use_post_neoadj: false           # 主分析中 label_source=post_neoadj 的分型和标志物标签按缺失处理
+  her2_2plus_without_fish: missing # HER2 IHC 2+ 且无 FISH：missing=按缺失；negative=按阴性
+  pdl1_thresholds: [1, 5, 10]      # PD-L1 CPS 阈值（≥ 阈值为阳性）
+  pdl1_main_threshold: 5
+  cldn182_threshold: 75            # Claudin18.2 阳性：中到强膜染色肿瘤细胞 ≥ 75%
+  ki67_threshold: null             # Ki-67 二分类阈值（待定；null 表示暂不生成二分类标签）
+
+# ---------------- 数据划分 ----------------
+split:
+  test_fraction: 0.2               # 内部中心中内部测试集比例
+  n_folds: 5                       # 训练集内交叉验证折数
+  seed: 2026
+  # 分层变量：每个变量分别在训练/测试、各折之间保持均衡（迭代分层，稀有阳性也能均匀分布）
+  stratify_by: [lauren, msi_h, ebv_pos, her2_pos]
+
+# ---------------- CT ----------------
+ct:
+  phase: venous                    # 使用的期相
+  # 期相识别关键词（在 SeriesDescription / ProtocolName 中匹配，不区分大小写）
+  phase_keywords:
+    delayed: [delay, delayed, equilibrium, 延迟, 平衡]
+    arterial: [arterial, artery, art, 动脉]
+    venous: [venous, portal, pvp, pv, 静脉, 门脉, 门静脉]
+    non_contrast: [plain, non-contrast, noncontrast, unenhanced, 平扫, nc]
+  # 若没有关键词，按造影剂注射后的延迟时间（秒）判断
+  phase_delay_s: {arterial: [15, 50], venous: [50, 110], delayed: [110, 100000]}
+  preferred_thickness_mm: 5.0      # 选择序列时优先的层厚
+  min_slices: 10                   # 少于该层数的序列视为定位像等，跳过
+  slice_spacing_tolerance: 0.1     # 层间距不均匀的容差（相对值）
+  allow_nonuniform: false          # 层间距不均匀（疑似缺层）时是否仍然转换
+  summary:
+    include_series_description: true  # 汇总中输出 SeriesDescription（自由文本；若发现含身份信息请设为 false）
+  native_orientation: LPS          # 原始 NIfTI 的统一方向
+  hu_clip: [-1024, 3071]
+  target_spacing: [0.8, 0.8, 5.0]  # 分析体素 (x, y, z) mm；z=5 mm 已确认，层面内间距待 DICOM 汇总后确定
+  average_thin_slices: true        # 薄层降到目标层厚时多层平均（模拟厚层），而非直接抽层
+  save_resampled: true             # 保存整卷重采样结果（nnU-Net / 整卷编码器使用）
+  save_thin_series: false          # 另存同一次采集中最薄的软组织重建（供医生在薄层上标注）
+  stomach_mask_dir: null           # 胃分割目录（null = <work_dir>/ct/stomach）
+  points:
+    annotation_dir: ct_points      # 医生标注文件目录：<study_id>.mrk.json 或 <study_id>_point.nii.gz
+  crop:
+    point_stomach_max_dist_mm: 20  # 中心点距胃分割超过该距离时提示复核
+    specs:
+      - name: tumor_96mm
+        center: point_or_mask      # point / mask_centroid / point_or_mask（优先点，没有点用分割质心）
+        spacing: [0.8, 0.8, 5.0]
+        size_vox: [120, 120, 16]   # 96 × 96 × 80 mm
+        window: {level: 40, width: 400}   # 腹部软组织窗
+        normalize: minmax          # minmax → [0,1]；zscore；none（保留 HU）
+      - name: regional_160mm
+        center: point_or_mask
+        spacing: [0.8, 0.8, 5.0]
+        size_vox: [200, 200, 32]   # 160 × 160 × 160 mm
+        window: {level: 40, width: 400}
+        normalize: minmax
+  qc:
+    overview_per_page: 48
+
+# ---------------- 病理切片 ----------------
+wsi:
+  backend: auto                    # auto / openslide / tifffile
+  default_base_mpp: null           # 切片中读不到 MPP 和倍率时使用的 level-0 µm/px（如 0.5）；null 则报错
+  tissue:
+    thumb_mpp: 8.0                 # 组织检测用缩略图的分辨率（µm/px）
+    min_saturation: 20             # 饱和度下限（0–255），Otsu 阈值不会低于它
+    max_value_white: 235           # 亮度高于此且饱和度低时视为背景
+    min_value_black: 40            # 亮度低于此视为黑色笔迹/杂质
+    filter_pen: true               # 过滤蓝/绿/黑色笔迹
+    min_area_mm2: 0.02             # 最小组织面积
+    close_iters: 2
+  tiling:
+    target_mpp: 0.5                # 20× ≈ 0.5 µm/px
+    tile_px: 224
+    min_tissue_fraction: 0.25      # 切块中组织占比 ≥ 该值才保留（活检组织少，取值偏低）
+  qc:
+    overview_per_page: 24
+
+# ---------------- 病理特征提取 ----------------
+features:
+  extractor: random_small          # 使用的编码器（见 extractors）
+  batch_size: 64
+  num_workers: 4                   # DataLoader 读取进程数
+  precision: bf16                  # GPU 上使用 bf16 混合精度；CPU 上自动使用 fp32
+  hash_weights: true               # 记录权重文件 SHA256（核对权重版本）
+  dtype: float32                   # 特征保存精度：float32 / float16
+  extractors:
+    random_small: {feature_dim: 64}
+    resnet50_trunc: {weights_path: null}    # torchvision resnet50 ImageNet 权重 .pth
+    uni2_h: {weights_path: null}            # UNI2-h pytorch_model.bin
+    virchow2: {weights_path: null}          # Virchow2 pytorch_model.bin
+    gigapath: {weights_path: null}          # Prov-GigaPath 切块编码器 pytorch_model.bin
+    # 通过已安装的 TRIDENT 调用其编码器（CONCH v1.5、MUSK、CHIEF 等），权重路径按 TRIDENT 的本地配置
+    trident:
+      model_name: null             # TRIDENT 中的编码器名，如 conch_v15 / musk / ctranspath
+      kwargs: {}
+
+# ---------------- TRIDENT 特征导入 ----------------
+trident:
+  job_dir: null                    # TRIDENT 的输出根目录（含 20x_256px_0px_overlap 之类的子目录）
+  # TRIDENT 编码器名 → 本项目编码器名（未列出的保持原名）
+  name_map:
+    uni_v2: uni2_h
+    virchow2: virchow2
+    conch_v15: conch_v15
+    musk: musk
+    gigapath: gigapath
+    ctranspath: chief_ctranspath
+    chief: chief_ctranspath
+    resnet50: resnet50_trunc
+  # 预期特征维数（不一致时警告）
+  expected_dims:
+    uni2_h: 1536
+    virchow2: 2560
+    conch_v15: 768
+    musk: 1024
+    gigapath: 1536
+    chief_ctranspath: 768
+    resnet50_trunc: 1024
+  min_tiles_warn: 10               # 切块数少于该值时警告
+
+# ---------------- 假数据（测试与演示用） ----------------
+fake_data:
+  seed: 7
+  n_per_center: {internal: 6, ext1: 2, ext2: 1, ext3: 1}
+  slide_size_px: [3072, 2048]      # 20× 下的切片尺寸（宽, 高）
+  ct_shape: [128, 128]             # CT 层面矩阵
+  ct_pixel_spacing: 1.2
+  ct_n_slices_5mm: 24
+  trident_encoders: {uni_v2: 1536, conch_v15: 768}
+  trident_patch_px: 256
+  feature_cohort:                  # --features-only：v1 测试/演示用的假特征队列
+    n_internal: 200
+    n_external: 60
+    encoders: {uni2_h: 32, conch_v15: 16}
+    tiles: [40, 200]
+    signal: 1.0                    # 埋入信号的强度倍数
+    seed: 11
+
+# ---------------- v1 病理多任务模型 ----------------
+v1:
+  encoders: [uni2_h]               # 使用的病理特征（TRIDENT 导入后的编码器名）；写多个表示逐切块拼接
+  feature_cache: true              # 特征以 float16 缓存在内存中（约 6 GB / 2000 例）；内存不足时设为 false
+  model:
+    aggregator: abmil              # abmil（主方案）/ transmil（对照）/ meanpool（简单基线）
+    hidden_dim: 256
+    attn_dim: 128
+    n_branches: 2                  # ABMIL 注意力分支数 = 病理 token 数
+    dropout: 0.25
+    transmil_heads: 4
+  tasks:
+    multiclass: [lauren]           # 可加 her2_3cls
+    binary: [her2_pos, msi_h, ebv_pos, pdl1_cps1, pdl1_cps5, pdl1_cps10, cldn182_pos]
+    regression: []                 # 可加 ki67_frac
+    survival: [os, dfs, pfs]
+  population_baselines: [os]       # 这些终点按手术/不可切除人群分别设基线风险（共享风险评分）
+  loss:
+    weighting: uncertainty         # uncertainty（不确定性加权）/ fixed（固定权重）
+    fixed_weights: {}              # 固定权重，如 {msi_h: 2.0}；未列出的为 1；也用于早停监测
+    max_pos_weight: 10             # 二分类正样本权重上限（权重 = 阴性数/阳性数）
+    lauren_class_weight: false
+    survival_loss: discrete        # discrete（离散时间，主方案）/ cox（对照）
+    survival_bins: 4               # 每个终点、每个人群的时间段数（按事件时间分位数）
+  train:
+    epochs: 50
+    batch_size: 8
+    lr: 2.0e-4
+    weight_decay: 1.0e-4
+    warmup_epochs: 2
+    grad_clip: 1.0
+    grad_accum: 1
+    max_tiles: 2048                # 训练时每例最多随机抽取的切块数（评估时用全部）
+    tile_dropout: 0.1              # 训练时随机丢弃的切块比例
+    inner_val_fraction: 0.15       # 内层验证集比例（用于早停；留出折不参与任何训练决策）
+    patience: 10                   # 内层验证损失连续多少个 epoch 不下降则停止
+    num_workers: 0
+    precision: bf16                # GPU 上 bf16 混合精度；CPU 自动 fp32
+  seeds: [0]
+  horizons_months: [12, 36, 60]    # 输出这些时间点的生存概率
+  save_attention: true
+  eval:
+    n_boot: 1000                   # bootstrap 次数
+  compare:
+    primary: [lauren, msi_h]       # 编码器比较的排名指标：这些任务主要指标的平均（预先规定）
+  profiles:
+    screening:                     # 编码器初筛：只训练 Lauren + MSI，3 个随机种子，其余超参数固定
+      tasks: {multiclass: [lauren], binary: [msi_h], regression: [], survival: []}
+      seeds: [0, 1, 2]

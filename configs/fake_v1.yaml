@@ -1,0 +1,16 @@
+# v1 假特征演示配置：bash scripts/run_v1_demo.sh 使用（全部为假数据）。
+_base_: default.yaml
+
+paths:
+  root: data/fake_v1
+  manifest: manifest.csv
+  work_dir: work
+  output_dir: outputs
+
+v1:
+  train:
+    epochs: 30
+    batch_size: 16
+    patience: 8
+  eval:
+    n_boot: 200
