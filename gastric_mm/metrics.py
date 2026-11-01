@@ -22,7 +22,8 @@ def _clean(*arrays):
     arrs = [np.asarray(a, dtype=float) for a in arrays]
     ok = np.ones(len(arrs[0]), dtype=bool)
     for a in arrs:
-        ok &= np.all(np.isfinite(a.reshape(len(a), -1)), axis=1)
+        # 不用 reshape(len(a), -1)：空数组时 -1 无法推断（某组某任务没有标签时会报错）
+        ok &= np.all(np.isfinite(a.reshape(a.shape[0], int(np.prod(a.shape[1:], dtype=int)))), axis=1)
     return [a[ok] for a in arrs]
 
 
@@ -139,6 +140,8 @@ def bootstrap_ci(fn: Callable, arrays: Sequence[np.ndarray], n_boot: int = 1000,
     """返回 (点估计, 下限, 上限)；fn(*arrays) 返回标量。"""
     arrays = [np.asarray(a) for a in arrays]
     point = fn(*arrays)
+    if len(arrays[0]) == 0:
+        return float(point), float("nan"), float("nan")
     vals = []
     for idx in bootstrap_indices(len(arrays[0]), n_boot, seed, strata):
         v = fn(*[a[idx] for a in arrays])
@@ -157,6 +160,8 @@ def paired_bootstrap_diff(fn: Callable, arrays_a: Sequence[np.ndarray], arrays_b
     arrays_a = [np.asarray(a) for a in arrays_a]
     arrays_b = [np.asarray(a) for a in arrays_b]
     d0 = fn(*arrays_a) - fn(*arrays_b)
+    if len(arrays_a[0]) == 0:
+        return {"diff": float(d0), "lo": float("nan"), "hi": float("nan"), "p_le_0": float("nan")}
     diffs = []
     for idx in bootstrap_indices(len(arrays_a[0]), n_boot, seed, strata):
         d = fn(*[a[idx] for a in arrays_a]) - fn(*[a[idx] for a in arrays_b])

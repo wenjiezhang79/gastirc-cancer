@@ -130,6 +130,34 @@ def test_metrics_known_values():
     assert d["diff"] > 0 and d["lo"] > 0
 
 
+def test_metrics_empty_groups(v1_env):
+    """某组某任务一个标签都没有（如外部某中心没有不可切除患者 → 无 PFS）时，指标为 NaN 而不是报错。"""
+    from gastric_mm.path_mtl.evaluate import evaluate
+    from gastric_mm.training.task_spec import TaskSpec
+    e = np.array([])
+    for fn, args in ((M.auc_binary, (e, e)), (M.pr_auc, (e, e)), (M.c_index, (e, e, e)), (M.spearman, (e, e)),
+                     (M.youden_threshold, (e, e))):
+        assert np.isnan(fn(*args))
+    assert np.isnan(M.multiclass_auc(e, np.zeros((0, 3)))[0])
+    assert np.isnan(M.bootstrap_ci(M.auc_binary, [e, e], 50)[1])
+    assert np.isnan(M.paired_bootstrap_diff(M.auc_binary, [e, e], [e, e], 50)["lo"])
+    spec = TaskSpec(multiclass={"lauren": 3}, binary=["msi_h"], survival=["os", "pfs"], population_baselines=["os"])
+    rng = np.random.RandomState(0)
+    n = 30
+    df = pd.DataFrame({"study_id": [f"C2-{i:04d}" for i in range(n)], "lauren": rng.randint(0, 3, n).astype(float),
+                       "lauren_intestinal": np.nan, "msi_h": np.nan, "msi_h_prob": rng.rand(n),
+                       "os_time": rng.exponential(30, n), "os_event": (rng.rand(n) < 0.5).astype(float),
+                       "os_risk": rng.normal(size=n), "pfs_time": np.nan, "pfs_event": np.nan, "pfs_risk": rng.normal(size=n),
+                       "population": "resected"})
+    for k in range(3):
+        df[f"lauren_p{k}"] = rng.rand(n)
+    rows = evaluate(df, spec, v1_env.cfg, n_boot=50, thresholds={"msi_h": 0.5})
+    got = {(r["task"], r["metric"]): r for r in rows}
+    assert np.isnan(got[("msi_h", "AUC")]["value"]) and got[("msi_h", "AUC")]["n"] == 0
+    assert np.isnan(got[("pfs", "C-index")]["value"]) and got[("pfs", "C-index")]["n"] == 0
+    assert np.isfinite(got[("os", "C-index")]["value"])
+
+
 # ---------------- 聚合器 ----------------
 @pytest.mark.parametrize("name", ["abmil", "transmil", "meanpool"])
 def test_aggregator_padding_invariance_and_grad(name):

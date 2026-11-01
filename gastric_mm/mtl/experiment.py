@@ -99,8 +99,8 @@ def inner_split(lab: pd.DataFrame, cfg: Config, frac: float, seed: int) -> np.nd
 
 
 def safe_evaluate(df: pd.DataFrame, spec: TaskSpec, cfg: Config, **kw) -> List[dict]:
-    """同 path_mtl.evaluate.evaluate，但先去掉该组中没有任何标签的任务（如某外部中心没有不可切除患者时的 PFS），
-    避免 v1 指标函数在空数组上报错；被去掉的任务在结果中记为"无标签"。"""
+    """同 path_mtl.evaluate.evaluate，但该组中没有任何标签的任务（如某外部中心没有不可切除患者时的 PFS）
+    只输出一行"该组无标签"，报告更清楚。"""
     def n_lab(t):
         if t in spec.survival:
             return int((df[f"{t}_time"].notna() & df[f"{t}_event"].notna()).sum())

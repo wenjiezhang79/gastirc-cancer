@@ -147,7 +147,7 @@
   - ⑥ 通用 token 多任务框架 `gastric_mm/mtl/`（v3 将复用）；CT 单模态交叉验证训练、最终评估（`--final` 登记）、编码器比较
   - 外部工具在测试与演示中用 `gastric_mm/fake_tools/` 的假命令代替；脚本 `20_`–`28_`、`run_v2_demo.sh`；离线准备 `docs/v2_offline_setup.md`
   - 待服务器验证：TotalSegmentator / nnU-Net / pyradiomics 环境；各 3D 编码器与 RadImageNet 用 3–5 例与官方代码核对；显存与速度
-  - 已知问题（未改动 v1）：`metrics._clean` 在某组某任务无标签时报错（如外部某中心无 PFS），v2 用 `safe_evaluate` 绕开；v1 最终评估可能受影响，待确认是否修复
+  - 已修复（2026-11-01，经研究者同意改动 v1 公共代码）：`metrics._clean` 等在某组某任务无标签时报错（如外部某中心没有不可切除患者 → 无 PFS），现返回 NaN；影响 v1 外部队列按中心报告，不改变任何已有结果
 - [ ] v3 融合 / v4 评估统计
 
 ## 9. 评估规范
