@@ -197,6 +197,7 @@ EXP=ct_radimagenet ENCODER=radimagenet_r50 GPU=0 bash scripts/26_v2_train.sh --f
 | 3 | `32_v3_late_fusion.sh` | 后期融合对照（平均 / 交叉拟合堆叠），无需 GPU | `outputs/fusion/late_mean/`、`late_stack/` |
 | 4 | `33_v3_ablation.sh` | 消融全套（拼接、双线性、可见缺失、维数 / 层数、模态丢弃、冻结 / 从头训练、固定权重、辅助头、只用肿瘤 ROI、单任务） | `outputs/fusion/abl_*`、`st_*` |
 | 5 | `34_v3_compare.sh` | 比较报告：按预先规定的规则判定融合是否明显超过最佳单模态与后期融合 | `outputs/fusion_compare/<时间>/compare_report.md`（可贴回） |
+| 诊断 | `36_v3_diagnose.sh` | 早停诊断：各任务自己最好的 epoch vs 实际停止（只读训练记录；说明见 `docs/v3_diagnosis.md`） | `outputs/fusion_diagnose/<时间>/diagnose_report.md`（可贴回） |
 | 6 | `35_v3_predict.sh` | 最终评估（定型后只运行一次；外部按中心 + 合并，按模态可用性分层） | `final_<队列>_<时间>/report.md` |
 
 ```bash
@@ -274,7 +275,7 @@ gastric_mm/
 ├── path_mtl/ train.py  predict.py  compare.py  evaluate.py  common.py
 ├── mtl/      data.py  model.py  fusion_model.py  trainer.py  experiment.py  spec.py （通用 token 多任务框架，v2/v3 共用）
 ├── ct_mtl/   train.py  predict.py  compare.py  radiomics_model.py  linear.py
-├── fusion/   check.py  train.py  late.py  compare.py  predict.py  common.py   （v3 融合；模型在 mtl/fusion_model.py）
+├── fusion/   check.py  train.py  late.py  compare.py  predict.py  diagnose.py  common.py   （v3 融合；模型在 mtl/fusion_model.py）
 ├── fake_tools/ totalseg.py  nnunet_predict.py                         （测试与演示用的假外部工具）
 ├── ct/   dicom_io.py  summary.py  convert.py  transforms.py  import_points.py  transfer.py  crop.py  qc.py
 │         external.py  stomach_seg.py  seg_sample.py  nnunet_data.py  tumor_post.py  import_reviewed.py
