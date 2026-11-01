@@ -1,6 +1,6 @@
 # CT 标注规范（草稿，供与影像科讨论）
 
-版本：2026-10-31 草稿。最终版本由研究团队与影像科确认后更新。
+版本：2026-11-01 草稿（v2 补充 cTNM 记录与自动分割审核流程）。最终版本由研究团队与影像科确认后更新。
 
 ## 0. 开始标注之前
 
@@ -34,17 +34,41 @@
 
 胃充盈程度不需要人工记录，由胃自动分割计算（v2）。
 
+**治疗前临床分期（结构化，写入清单）：**
+
+| 列名 | 取值 | 说明 |
+|---|---|---|
+| `ct_t` | `T1` / `T1a` / `T1b` / `T2` / `T3` / `T4` / `T4a` / `T4b` / `TX` | 可写 `cT3`，程序统一为 `T3`；`TX` = 无法评估（按缺失） |
+| `ct_n` | `N0` / `N1` / `N2` / `N3` / `N3a` / `N3b` / `N+` / `NX` | |
+| `ct_m` | `M0` / `M1` / `MX` | |
+| `ct_stage_source` | `report` / `research_read` | 来自放射报告 / 病历，还是研究阅片（如标中心点时顺手判读） |
+| `ajcc_edition` | 如 `8` | AJCC 版本 |
+
+优先从放射报告或病历整理；报告中没有时，可由影像科医生标中心点时判读并注明 `research_read`。
+cTNM **不作为模型输入**，只用于勾画病例的分层抽样、CT 编码器筛选的辅助参考和 v4 的多因素分析与列线图。
+
 ## 2. 肿瘤三维勾画（部分病例）
 
-- **病例选择：** 从**内部训练集**中按 T 分期分层抽取 200–300 例（划分文件见 `work/splits/`），不得使用内部测试集和外部中心病例。
+- **病例选择：** 运行 `bash scripts/21_seg_sample.sh`，程序从**内部训练集**中按 cT 分期（`ct_t`）分层抽取 200–300 例，
+  名单在 `work/ct/seg_sample.csv`（只含研究编号）。早期癌少，可在配置 `v2.seg_sample.min_per_group` 中给 T1 设最少例数。
+  不得使用内部测试集和外部中心病例（这些病例即使勾画了也不会用于训练 nnU-Net）。
 - **层厚：** 在分析层厚（预计 5 mm）的 native 图像上逐层勾画即可；若在薄层上勾画，可隔层勾画后用软件插值，再用 `bash scripts/03c_transfer_masks.sh` 转到分析网格。
 - **范围：** 勾画肿瘤实体（含增厚的胃壁），不包括胃腔内容物、周围脂肪和淋巴结。
 - **保存：** 二值分割（0 / 1），文件名 `<study_id>_tumor.nii.gz`，在清单中填 `tumor_mask_path`，`mask_source=manual`。
 
 ## 3. 两阶段自动分割（v2）
 
-1. TotalSegmentator 自动分割全部病例的胃（无需人工）。程序自动检查中心点到胃的距离（`04_ct_crop.sh` 的 `point_to_stomach_mm`），超过 20 mm 的病例请复核标点。
-2. 在胃分割外扩 15–20 mm 的范围内，用人工勾画的病例训练 nnU-Net 分割肿瘤；其余病例自动分割，用中心点挑出肿瘤连通域，医生审核修改后保存，`mask_source=auto_reviewed`。
+1. **胃分割（全部病例，无需人工）：** `bash scripts/20_stomach_seg.sh`。程序检查中心点到胃的距离，
+   超过 20 mm 的病例在 `status.csv` 中提示，请复核标点（或胃分割）。
+2. **肿瘤分割：** 用人工勾画的病例训练 nnU-Net（`MODE=train bash scripts/22_nnunet_prepare.sh` 后运行生成的训练脚本），
+   在胃分割外扩 20 mm（并保证中心点周围 ±48 mm）的范围内分割其余病例，程序用中心点挑出肿瘤连通域
+   （`bash scripts/23_nnunet_postprocess.sh`）。
+3. **医生审核：** 打开 `work/ct/tumor_auto/review_list.csv`，按 priority 从 1 开始审核（1 = 有提示：未找到肿瘤、
+   有多块、体积异常、触及裁剪框边界等）。在 ITK-SNAP / 3D Slicer 中同时打开 `work/ct/native/<study_id>.nii.gz`
+   与 `work/ct/tumor_auto/<study_id>_tumor.nii.gz`，修改后另存到审核目录（文件名 `<study_id>_tumor.nii.gz`）；
+   不需要修改的也要另存一份（表示已审核）。确实无法分割的，在清单中把 `tumor_visibility` 改为 `invisible`。
+4. **导入：** `SRC=<审核目录> bash scripts/23b_import_reviewed.sh`，程序生成 `private/manifest_with_reviewed.csv`
+   （`mask_source=auto_reviewed`），并统计医生修改的幅度（与自动结果的 Dice）。核对后替换原清单。
 
 ## 4. 质控
 

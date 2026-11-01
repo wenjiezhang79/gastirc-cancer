@@ -41,7 +41,7 @@ MANIFEST_COLUMNS = [
     "tumor_mask_path", "mask_source", "lauren", "her2_ihc", "her2_fish", "msi", "ebv", "pdl1_cps",
     "cldn182_pct", "ki67_pct", "label_source", "population", "os_months", "os_event", "dfs_months",
     "dfs_event", "pfs_months", "pfs_event", "neoadj", "immuno", "ctnm_stage", "age", "sex", "ecog",
-    "tumor_visibility", "borrmann",
+    "tumor_visibility", "borrmann", "ct_t", "ct_n", "ct_m", "ct_stage_source",
 ]
 
 
@@ -315,6 +315,16 @@ def _maybe(rng, v, p_missing=0.15):
     return "" if rng.rand() < p_missing else v
 
 
+def split_ctnm(text: str) -> dict:
+    """把 cT3N1M0 这类文本拆成 ct_t / ct_n / ct_m（假数据用）。"""
+    import re
+
+    m = re.match(r"^c?(T[0-9][ab]?)(N[0-9][ab]?)(M[01])$", text or "")
+    if not m:
+        return {"ct_t": "", "ct_n": "", "ct_m": "", "ct_stage_source": ""}
+    return {"ct_t": m.group(1), "ct_n": m.group(2), "ct_m": m.group(3), "ct_stage_source": "report"}
+
+
 def random_labels(rng: np.random.RandomState) -> dict:
     d = {}
     d["lauren"] = _maybe(rng, _choice(rng, ["intestinal", "diffuse", "mixed"], [0.5, 0.35, 0.15]), 0.1)
@@ -340,6 +350,7 @@ def random_labels(rng: np.random.RandomState) -> dict:
     d["neoadj"] = str(int(rng.rand() < 0.2))
     d["immuno"] = str(int(rng.rand() < 0.12))
     d["ctnm_stage"] = _choice(rng, ["cT2N0M0", "cT3N1M0", "cT4aN2M0", "cT4bN3M1"], [1, 1, 1, 0.5])
+    d.update(split_ctnm(d["ctnm_stage"]))   # 结构化 cTNM（由文本确定性拆分，不消耗随机数）
     d["age"] = f"{rng.uniform(35, 82):.0f}"
     d["sex"] = _choice(rng, ["M", "F"], [0.7, 0.3])
     d["ecog"] = str(_choice(rng, [0, 1, 2], [0.5, 0.4, 0.1]))
@@ -616,11 +627,153 @@ def generate_feature_cohort(cfg: Config, logger=None, overwrite: bool = False) -
     return {"n_internal": n_int, "n_external": n_ext, "encoders": dims}
 
 
+# ============================================================
+# v2 / v3 用：多模态假特征队列（病理特征 + CT ROI 特征 + 影像组学表，埋入已知信号）
+# ============================================================
+def generate_mm_cohort(cfg: Config, logger=None, overwrite: bool = False) -> dict:
+    """生成多模态假特征队列（不生成图像）：清单（含结构化 cT）、划分、病理特征、CT ROI 特征、影像组学特征表。
+
+    埋入的信号（检验模型能学到、且两种模态互补）：
+    - 预后：潜在风险 = 病理部分 z_p + CT 部分 z_c；病理特征只含 z_p，CT 特征只含 z_c；
+    - cT 分期由 z_c 决定（CT 区域 ROI 中体现）；
+    - Lauren：病理与 CT 肿瘤 ROI 中都有（CT 较弱）；MSI-H 只在病理中；
+    - 维数越低的假 CT 编码器噪声越大（模拟"较弱"的编码器）；EBV、PD-L1、Claudin18.2 无信号；
+    - CT 缺失约 12%，单个 ROI 缺失少量；影像组学表只覆盖有分割的病例（约 70%）。
+    """
+    import csv
+
+    from .ct.features_io import write_ct_features
+    from .labels import derive_labels
+    from .manifest import read_manifest_csv, validate_manifest
+    from .split import make_split
+    from .wsi.features_io import write_features
+
+    fc = cfg.fake_data.get("mm_cohort", {}) or {}
+    n_int, n_ext = int(fc.get("n_internal", 300)), int(fc.get("n_external", 60))
+    p_enc = dict(fc.get("path_encoders", {"uni2_h": 32}))
+    c_enc = dict(fc.get("ct_encoders", {"fake_ct_a": 24, "fake_ct_b": 12}))
+    s_lo, s_hi = (int(v) for v in fc.get("slices", [5, 9]))
+    k = float(fc.get("signal", 1.0))
+    rad_name = str(fc.get("radiomics_name", cfg.get_path("v2.radiomics.name", "original_bw25")))
+    rng = np.random.RandomState(int(fc.get("seed", 13)))
+    root = root_dir(cfg)
+    out_dir = resolve_path(cfg, cfg.paths.output_dir).resolve()
+    existing = [p for p in root.iterdir() if p.resolve() != out_dir] if root.exists() else []
+    if existing and not (root / MARKER).exists():
+        raise UserError(f"目标目录 {root} 已有内容且不是假数据目录，拒绝写入。", "请把 paths.root 指向新的空目录。")
+    if existing and not overwrite:
+        raise UserError(f"假数据目录 {root} 已存在。", "如需重新生成，加 --overwrite。")
+    for p in existing:
+        shutil.rmtree(p) if p.is_dir() else p.unlink()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / MARKER).write_text("由 gastric_mm.fake_data 生成的假数据目录（多模态特征队列）\n", encoding="utf-8")
+    wp = WorkPaths(cfg)
+    Dp = max(p_enc.values())
+    Dc = max(c_enc.values())
+    mix_p = {e: rng.normal(size=(Dp, d)) / np.sqrt(Dp) + (np.eye(Dp, d) if d <= Dp else 0) for e, d in p_enc.items()}
+    mix_c = {e: rng.normal(size=(Dc, d)) / np.sqrt(Dc) + np.eye(Dc, d) for e, d in c_enc.items()}
+    noise_c = {e: 0.2 if d >= Dc else 3.0 for e, d in c_enc.items()}
+    t_groups = ["T1", "T2", "T3", "T4a"]
+    rows, rad_rows = [], []
+    centers = ["internal"] * n_int + [["ext1", "ext2", "ext3"][i % 3] for i in range(n_ext)]
+    counters: Dict[str, int] = {}
+    for center in centers:
+        counters[center] = counters.get(center, 0) + 1
+        sid = f"{CENTER_PREFIX[center]}-{counters[center]:04d}"
+        lauren = int(rng.choice(3, p=[0.5, 0.35, 0.15]))
+        msi = int(rng.rand() < 0.15)
+        zp, zc = rng.normal(), rng.normal()
+        ti = int(np.clip(np.digitize(zc + 0.5 * rng.normal(), [-1.0, -0.2, 0.7]), 0, 3))
+        pop = "resected" if rng.rand() < 0.85 else "unresectable"
+        base = 1 / 60.0 if pop == "resected" else 1 / 12.0
+        t_ev = rng.exponential(1 / (base * np.exp(0.8 * zp + 0.8 * zc)))
+        t_c = rng.uniform(6, 90)
+        os_m, os_e = min(t_ev, t_c), int(t_ev <= t_c)
+        # ---- 病理 ----
+        n = rng.randint(30, 120)
+        x = rng.normal(size=(n, Dp)).astype(np.float32)
+        x[rng.rand(n) < 0.5, lauren] += 0.6 * k
+        if msi:
+            x[rng.rand(n) < 0.3, 3:6] += 0.9 * k
+        x[:, 6:8] += 0.5 * k * zp
+        coords = np.stack([np.arange(n) % 20 * 256, np.arange(n) // 20 * 256], 1)
+        for e, Mx in mix_p.items():
+            write_features(wp.wsi_features(e, sid), (x @ Mx + 0.1 * rng.normal(size=(n, Mx.shape[1]))).astype(np.float32),
+                           coords, {"encoder": e, "source": "fake"})
+        # ---- CT ----
+        has_ct = rng.rand() > 0.12
+        if has_ct:
+            ns = rng.randint(s_lo, s_hi + 1)
+            tum = rng.normal(size=(ns, Dc))
+            tum[:, lauren] += 0.5 * k
+            tum[:, 3:5] += 0.6 * k * zc
+            reg = rng.normal(size=(ns + 4, Dc))
+            reg[:, 5] += 0.6 * k * (ti - 1.5)
+            reg[:, 6] += 0.4 * k * zc
+            miss_t, miss_r = rng.rand() < 0.04, rng.rand() < 0.06
+            for e, Mx in mix_c.items():
+                rois = {}
+                if not miss_t:
+                    rois["tumor"] = tum @ Mx + noise_c[e] * rng.normal(size=(ns, Mx.shape[1]))
+                if not miss_r or miss_t:
+                    rois["regional"] = reg @ Mx + noise_c[e] * rng.normal(size=(ns + 4, Mx.shape[1]))
+                write_ct_features(wp.ct_features(e, sid), rois, {"encoder": e, "kind": "2d", "source": "fake"})
+        has_mask = has_ct and rng.rand() < 0.7
+        if has_mask:
+            f = rng.normal(size=30)
+            f[0] += 0.8 * k * zc
+            f[1] = f[0] * 0.98 + 0.05 * rng.normal()      # 与 f0 高度相关（检验去冗余）
+            f[2] += 0.6 * k * (lauren == 1)
+            f[3] += 0.5 * k * (ti - 1.5)
+            r = {"study_id": sid, "mask_source": "manual" if rng.rand() < 0.3 else "auto_reviewed"}
+            r.update({f"original_feat{j:02d}": float(v) for j, v in enumerate(f)})
+            r["original_const"] = 1.0                      # 常数特征（检验剔除）
+            rad_rows.append(r)
+
+        def miss(v, p=0.1):
+            return "" if rng.rand() < p else v
+        r = {c: "" for c in MANIFEST_COLUMNS}
+        r.update(study_id=sid, center=center, lauren=miss(["intestinal", "diffuse", "mixed"][lauren]),
+                 her2_ihc=miss(str(rng.choice(["0", "1+", "3+"], p=[0.5, 0.35, 0.15]))),
+                 msi=miss("MSI-H" if msi else "MSS"), ebv=miss("pos" if rng.rand() < 0.08 else "neg"),
+                 pdl1_cps=miss(f"{rng.exponential(6):.0f}"), cldn182_pct=miss(f"{rng.uniform(0, 100):.0f}"),
+                 label_source="biopsy", population=pop, os_months=f"{os_m:.1f}", os_event=str(os_e),
+                 neoadj="0", immuno="0", ct_t=miss(t_groups[ti], 0.08), ct_stage_source="report",
+                 ct_dir=("raw/ct/" + sid) if has_ct else "", tumor_visibility="clear")
+        if pop == "resected":
+            r.update(dfs_months=f"{os_m * rng.uniform(0.5, 1):.1f}", dfs_event=str(int(os_e or rng.rand() < 0.2)))
+        else:
+            r.update(pfs_months=f"{os_m * rng.uniform(0.3, 0.8):.1f}", pfs_event=str(int(os_e or rng.rand() < 0.5)))
+        rows.append(r)
+    mpath = resolve_path(cfg, cfg.paths.manifest)
+    mpath.parent.mkdir(parents=True, exist_ok=True)
+    with open(mpath, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=MANIFEST_COLUMNS)
+        w.writeheader()
+        w.writerows(rows)
+    if rad_rows:
+        import pandas as pd
+        rd = wp.ct_radiomics(rad_name)
+        rd.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(rad_rows).to_csv(rd / "features.csv", index=False)
+    res = validate_manifest(read_manifest_csv(mpath), cfg, check_paths=False)
+    split = make_split(derive_labels(res.df, cfg), cfg)
+    sp = wp.splits / f"split_seed{cfg.split.get('seed', cfg.get('seed'))}.csv"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    split.to_csv(sp, index=False)
+    if logger:
+        logger.info("多模态假特征队列已生成：内部 %d 例、外部 %d 例；病理 %s；CT %s；影像组学 %d 例",
+                    n_int, n_ext, p_enc, c_enc, len(rad_rows))
+    return {"n_internal": n_int, "n_external": n_ext, "n_radiomics": len(rad_rows)}
+
+
 def _run(args) -> int:
     cfg = load_config(args.config, args.set)
     run = Run(cfg, "fake_data", args.run_name)
     if args.features_only:
         generate_feature_cohort(cfg, run.logger, overwrite=args.overwrite)
+    elif args.mm_cohort:
+        generate_mm_cohort(cfg, run.logger, overwrite=args.overwrite)
     else:
         generate(cfg, run.logger, overwrite=args.overwrite)
     return 0
@@ -631,6 +784,8 @@ def main(argv=None) -> int:
     p.add_argument("--overwrite", action="store_true", help="删除并重新生成已有的假数据目录")
     p.add_argument("--features-only", action="store_true",
                    help="只生成假特征队列（埋入已知信号，供 v1 模型测试与演示）")
+    p.add_argument("--mm-cohort", action="store_true",
+                   help="生成多模态假特征队列（病理 + CT 特征 + 影像组学表，供 v2/v3 模型测试与演示）")
     return run_main(_run, p, argv)
 
 

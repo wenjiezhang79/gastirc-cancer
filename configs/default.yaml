@@ -212,3 +212,166 @@ v1:
     screening:                     # 编码器初筛：只训练 Lauren + MSI，3 个随机种子，其余超参数固定
       tasks: {multiclass: [lauren], binary: [msi_h], regression: [], survival: []}
       seeds: [0, 1, 2]
+
+# ============================================================
+# v2 CT 分支：胃分割、肿瘤分割、CT 特征、影像组学、CT 单模态多任务模型
+# ============================================================
+v2:
+  # ---- 外部工具：各自装在独立的 Python 环境中（见 docs/v2_offline_setup.md） ----
+  external:
+    totalseg:
+      command: TotalSegmentator        # 可执行文件；建议写独立环境中的绝对路径，如 /opt/envs/totalseg/bin/TotalSegmentator
+      home_dir: null                   # TotalSegmentator 权重目录（作为环境变量 TOTALSEG_HOME_DIR）；权重须预先拷入
+      fast: false                      # true：3 mm 快速模型（精度略低，显存与时间更少）
+      extra_args: []                   # 额外命令行参数
+      timeout_s: 1800                  # 单例超时（秒）
+    nnunet:
+      bin_dir: null                    # nnU-Net 环境的 bin 目录（含 nnUNetv2_train 等）；null = 已在 PATH 中
+      raw_dir: null                    # 环境变量 nnUNet_raw；null = <work_dir>/ct/nnunet/nnUNet_raw
+      preprocessed_dir: null           # 环境变量 nnUNet_preprocessed；null = <work_dir>/ct/nnunet/nnUNet_preprocessed
+      results_dir: null                # 环境变量 nnUNet_results；null = <work_dir>/ct/nnunet/nnUNet_results
+      predict_command: null            # 推理命令（null = <bin_dir>/nnUNetv2_predict）；测试中替换为假工具
+      timeout_s: 172800
+
+  # ---- ① 胃分割（TotalSegmentator） ----
+  stomach:
+    min_ml: 30                         # 胃体积小于该值时提示复核（可能分割失败）
+
+  # ---- ② 人工勾画病例抽样（只从内部训练集抽） ----
+  seg_sample:
+    n: 250                             # 人工勾画例数（200–300）
+    seed: 2026
+    stratify_by: [ct_t_group]          # 分层变量：ct_t_group（T1–T4），可加 borrmann、tumor_visibility
+    min_per_group: {}                  # 各 cT 分组的最少例数，如 {T1: 30}（早期癌少，可适当多抽）
+    exclude_visibility: [invisible]    # 这些可见度的病例不抽（看不到的肿瘤无法勾画）
+    require_point: true                # 只抽已标中心点的病例
+
+  # ---- ② 肿瘤分割（nnU-Net v2，胃分割外扩范围内） ----
+  tumor_seg:
+    dataset_id: 501
+    dataset_name: GastricTumor
+    configuration: 3d_fullres
+    trainer: nnUNetTrainer
+    folds: [0, 1, 2, 3, 4]
+    margin_mm: 20                      # 胃分割外扩范围（15–20 mm）
+    point_margin_mm: 48                # 同时保证中心点周围 ±该范围在框内（胃分割漏掉肿瘤所在胃壁时兜底）
+    stomach_channel: true              # 第 2 个输入通道 = 胃分割
+    min_component_ml: 0.5              # 小于该体积的连通域视为噪声
+    max_point_dist_mm: 15              # 中心点到最近连通域超过该距离 → 标为“未找到肿瘤”
+    warn_volume_ml: [1.0, 400.0]       # 肿瘤体积超出该范围时提示
+
+  # ---- ④ CT 特征提取（冻结编码器） ----
+  features:
+    encoder: radimagenet_r50           # 默认编码器（命令行 --encoder 可覆盖）
+    batch_size: 32
+    precision: bf16                    # GPU 上 bf16；CPU 自动 fp32
+    dtype: float32                     # 特征保存精度
+    hash_weights: true
+    input_px: 224                      # 2.5D：每层缩放到的边长
+    slices_2d: {tumor: 3, regional: 7} # 2.5D：取中心层 ±k 层（5 mm 层厚下 ±3 层 = 35 mm）；null = ROI 内全部层
+    channels_2d: adjacent              # 2.5D：adjacent = 相邻 3 层作 RGB；repeat = 同一层复制 3 次
+    # 3D 编码器使用的额外裁剪规格（提特征时直接从 native 生成，不写裁剪文件；写法同 ct.crop.specs）
+    roi_specs:
+      - name: hu_tumor_96mm            # CT-FM：保留 HU（-1024–2048），编码器内部再缩放
+        center: point_or_mask
+        spacing: [0.8, 0.8, 5.0]
+        size_vox: [120, 120, 16]
+        window: {level: 512, width: 3072}
+        normalize: none
+      - name: hu_regional_160mm
+        center: point_or_mask
+        spacing: [0.8, 0.8, 5.0]
+        size_vox: [200, 200, 32]
+        window: {level: 512, width: 3072}
+        normalize: none
+      - name: merlin_abdomen           # Merlin：1.5 × 1.5 × 3 mm，224 × 224 × 160，HU −1000–1000
+        center: point_or_mask
+        spacing: [1.5, 1.5, 3.0]
+        size_vox: [224, 224, 160]
+        window: {level: 0, width: 2000}
+        normalize: none
+      - name: suprem_144mm             # SuPreM：1.5 mm 各向同性，96³，HU −175–250
+        center: point_or_mask
+        spacing: [1.5, 1.5, 1.5]
+        size_vox: [96, 96, 96]
+        window: {level: 37.5, width: 425}
+        normalize: none
+    # 各编码器：weights_path 为本地权重文件；rois 为 ROI 角色 → 裁剪规格（ct.crop.specs 或上面 roi_specs 中的名称）
+    encoders:
+      random_small_2d: {feature_dim: 32, rois: {tumor: tumor_96mm, regional: regional_160mm}}   # 测试用
+      random_small_3d: {feature_dim: 32, rois: {tumor: tumor_96mm, regional: regional_160mm}}   # 测试用
+      imagenet_r50: {weights_path: null, rois: {tumor: tumor_96mm, regional: regional_160mm}}   # torchvision resnet50 .pth
+      radimagenet_r50:                 # RadImageNet ResNet50（PyTorch 权重）
+        weights_path: null
+        rois: {tumor: tumor_96mm, regional: regional_160mm}
+        mean: [0.485, 0.456, 0.406]    # 输入标准化（需按 RadImageNet 官方说明核对）
+        std: [0.229, 0.224, 0.225]
+      dinov2_vitb14: {weights_path: null, rois: {tumor: tumor_96mm, regional: regional_160mm}}  # 官方 dinov2_vitb14_pretrain.pth 或 timm 权重
+      merlin: {weights_path: null, rois: {regional: merlin_abdomen}}       # 需安装 merlin-vlm；权重为官方 .pt
+      ctfm: {weights_path: null, rois: {tumor: hu_tumor_96mm, regional: hu_regional_160mm}}   # 需安装 monai；权重为 model.safetensors
+      suprem: {weights_path: null, arch: swinunetr, rois: {tumor: suprem_144mm}}               # 需安装 monai
+
+  # ---- ⑤ 影像组学（在 pyradiomics 独立环境中运行） ----
+  radiomics:
+    name: original_bw25                # 特征表名称：<work_dir>/ct/radiomics/<名称>/features.csv
+    mask_sources: [manual, auto_reviewed]
+    spacing: [0.8, 0.8, 5.0]           # 提取前统一重采样到的体素
+    bin_width: 25                      # 灰度离散化宽度（HU）
+    image_types: {Original: {}}        # 可加 LoG: {sigma: [2.0, 3.0, 4.0]}、Wavelet: {}
+    feature_classes: [firstorder, shape, glcm, glrlm, glszm, gldm, ngtdm]
+    min_mask_voxels: 20
+    model:                             # 影像组学基线模型（每折内拟合，只用训练部分）
+      corr_threshold: 0.9              # 去冗余：相关系数绝对值超过该值的特征只保留一个
+      n_lambdas: 20                    # LASSO 正则化路径长度
+      lambda_min_ratio: 0.01
+      inner_folds: 5                   # 选择 λ 的内层交叉验证折数
+      max_iter: 500
+
+  # ---- ⑥ CT 单模态多任务模型 ----
+  encoder: radimagenet_r50             # 使用的 CT 特征（④ 提取后的编码器名；命令行 --encoder 可覆盖）
+  rois: [tumor, regional]              # 使用的 ROI token（特征文件中缺少的 ROI 按缺失处理）
+  feature_cache: true
+  model:
+    aggregator: abmil                  # 2.5D 多层特征聚合为 1 个 token：abmil（门控注意力）/ meanpool
+    hidden_dim: 256
+    attn_dim: 128
+    dropout: 0.25
+  tasks:
+    multiclass: [lauren]
+    binary: [her2_pos, msi_h, ebv_pos, pdl1_cps1, pdl1_cps5, pdl1_cps10, cldn182_pos]
+    regression: []
+    survival: [os, dfs, pfs]
+  population_baselines: [os]
+  loss:
+    weighting: uncertainty
+    fixed_weights: {}
+    max_pos_weight: 10
+    lauren_class_weight: false
+    survival_loss: discrete
+    survival_bins: 4
+  train:
+    epochs: 50
+    batch_size: 16
+    lr: 2.0e-4
+    weight_decay: 1.0e-4
+    warmup_epochs: 2
+    grad_clip: 1.0
+    grad_accum: 1
+    slice_dropout: 0.1                 # 训练时随机丢弃的层比例（2.5D）
+    roi_dropout: 0.1                   # 训练时随机丢弃一个 ROI token 的概率（另一个保留）
+    inner_val_fraction: 0.15
+    patience: 10
+    num_workers: 0
+    precision: bf16
+  seeds: [0]
+  horizons_months: [12, 36, 60]
+  save_attention: true
+  eval:
+    n_boot: 1000
+  compare:
+    primary: [os, lauren]              # 编码器比较的排名指标（预先规定）：折外 OS C-index 与 Lauren 宏平均 AUC 的平均
+    auxiliary: [ct_t34]                # 辅助参考（cT3–4 vs cT1–2 AUC），只报告，不参与排名
+  profiles:
+    screening:                         # CT 编码器初筛：Lauren + OS（+ cT 辅助头），3 个随机种子，其余超参数固定
+      tasks: {multiclass: [lauren], binary: [ct_t34], regression: [], survival: [os]}
+      seeds: [0, 1, 2]

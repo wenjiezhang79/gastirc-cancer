@@ -61,9 +61,12 @@
 | `pfs_months`, `pfs_event` | 无进展生存（晚期患者） | 数值，0/1，可空 |
 | `neoadj`, `immuno` | 是否新辅助 / 免疫治疗 | 0/1 |
 | `ctnm_stage`, `age`, `sex`, `ecog` | 临床协变量 | 按需 |
+| `ct_t`, `ct_n`, `ct_m` | 结构化治疗前临床分期（v2 起，可选） | `T1/T1a/T1b/T2/T3/T4/T4a/T4b/TX`（可写 cT3）、`N0–N3/N+/NX`、`M0/M1/MX` |
+| `ct_stage_source`, `ajcc_edition` | 分期来源、AJCC 版本 | `report` / `research_read`；如 8 |
 
 - **空值表示缺失**，训练时对应任务的损失被屏蔽，不删除病例。
 - 由原始字段派生训练标签的规则集中写在一个模块里（如 HER2 阳性 = IHC 3+ 或 2+ 且 FISH 阳性；PD-L1 阈值 1/5/10；Claudin18.2 阳性 = ≥75%）。
+- cTNM 不作为任何模型的输入，只用于勾画抽样分层、CT 编码器筛选的辅助参考（`ct_t34`）和 v4 统计分析。
 - `label_source == post_neoadj` 的分型和标志物标签，主分析中按缺失处理，敏感性分析时可配置启用。
 - 读取清单时必须做校验：列名、取值范围、路径存在性、`study_id` 唯一，并输出一份校验报告。
 
@@ -133,7 +136,19 @@
   - 编码器比较（`path_mtl.compare`）：预先规定的排名指标 + 配对 bootstrap 差值；初筛预设 `--profile screening`
   - 脚本：`10_v1_train.sh`、`11_v1_compare_encoders.sh`、`12_v1_predict.sh`、`13_v1_ablation.sh`、`run_v1_demo.sh`
   - 待服务器验证：真实特征上的训练速度、显存与指标；超参数默认值（lr 2e-4、50 epoch、patience 10）需结合真实数据确认
-- [ ] v2 CT / v3 融合 / v4 评估统计
+- [x] **v2 CT 分支**（2026-11-01 完成代码，假数据 CPU 测试通过；尚未在真实数据上运行。约定见 `docs/decisions.md` 第十三节）
+  - 清单新增结构化 cTNM（`ct_t/ct_n/ct_m/ct_stage_source/ajcc_edition`），派生 `ct_t_group`、`ct_t34`（不作为模型输入）
+  - ① 胃分割：TotalSegmentator 封装（独立环境、离线检查、对齐 native、胃体积与中心点距离核查、质控图）
+  - ② 肿瘤分割：按 cT 分层抽勾画病例；nnU-Net v2 数据集（胃外扩框、可选胃掩码通道）与训练/推理脚本；推理结果贴回、
+    按中心点选连通域、待审核清单；导入医生审核结果（auto_reviewed，统计修改幅度）；5 折 Dice 汇总
+  - ④ CT 特征：编码器注册表（2.5D：RadImageNet / ImageNet ResNet50、DINOv2；3D：CT-FM、SuPreM、Merlin；随机小网络用于测试），
+    ROI 直接从 native 按规格生成，统一特征文件接口（v3 共用），`--dump-inputs` 供与官方代码核对
+  - ⑤ 影像组学：pyradiomics（独立环境）；L1 线性基线（逻辑 / 多项 / 分层 Cox + Breslow，纯 numpy）
+  - ⑥ 通用 token 多任务框架 `gastric_mm/mtl/`（v3 将复用）；CT 单模态交叉验证训练、最终评估（`--final` 登记）、编码器比较
+  - 外部工具在测试与演示中用 `gastric_mm/fake_tools/` 的假命令代替；脚本 `20_`–`28_`、`run_v2_demo.sh`；离线准备 `docs/v2_offline_setup.md`
+  - 待服务器验证：TotalSegmentator / nnU-Net / pyradiomics 环境；各 3D 编码器与 RadImageNet 用 3–5 例与官方代码核对；显存与速度
+  - 已修复（2026-11-01，经研究者同意改动 v1 公共代码）：`metrics._clean` 等在某组某任务无标签时报错（如外部某中心没有不可切除患者 → 无 PFS），现返回 NaN；影响 v1 外部队列按中心报告，不改变任何已有结果
+- [ ] v3 融合 / v4 评估统计
 
 ## 9. 评估规范
 

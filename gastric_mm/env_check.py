@@ -37,6 +37,8 @@ CHECK_MODULES = [
     ("transformers", "transformers", "可选：部分编码器依赖"), ("huggingface_hub", "huggingface_hub", "可选"),
     ("torchscale", "torchscale", "可选：MUSK 依赖"), ("musk", "musk", "可选：MUSK"),
     ("conch", "conch", "可选：CONCH"), ("sklearn", "scikit-learn", "v1：评估"), ("lifelines", "lifelines", "v4：生存统计"),
+    ("einops", "einops", "v2：SuPreM（SwinUNETR）"), ("safetensors", "safetensors", "v2：CT-FM / DINOv2 的 .safetensors 权重"),
+    ("merlin", "merlin-vlm", "v2：Merlin（可选）"),
 ]
 
 
@@ -120,7 +122,9 @@ def sha256_file(path: Path, chunk: int = 1 << 22) -> str:
 
 def check_weights(cfg, do_hash: bool) -> List[dict]:
     rows = []
-    exts = cfg.get_path("features.extractors", {}) or {}
+    exts = dict(cfg.get_path("features.extractors", {}) or {})
+    for name, ec in (cfg.get_path("v2.features.encoders", {}) or {}).items():
+        exts[f"CT:{name}"] = ec
     for name, ec in exts.items():
         if not isinstance(ec, dict) or "weights_path" not in ec:
             continue
@@ -209,6 +213,11 @@ def _run(args) -> int:
     missing = [r["module"] for r in mods if r["use"].startswith("必需") and r["import"] != "OK"]
     if missing:
         log.warning("缺少必需的包：%s。安装方法见 README 的“离线安装”一节。", ", ".join(missing))
+    for key, what in (("v2.external.totalseg.home_dir", "TotalSegmentator 权重目录"),
+                      ("v2.external.nnunet.bin_dir", "nnU-Net 环境 bin 目录")):
+        v = cfg.get_path(key)
+        if v:
+            log.info("%s（%s）：%s", what, key, "存在" if resolve_path(cfg, v).is_dir() else "不存在")
     log.info("环境检查完成，请把 %s 的内容贴回。", run.path("env_report.md"))
     return 0
 

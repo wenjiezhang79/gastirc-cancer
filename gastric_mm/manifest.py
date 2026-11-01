@@ -33,6 +33,11 @@ from .utils.runio import Run
 # ---------------- 列定义 ----------------
 LABEL_SOURCES = ["biopsy", "surgery", "post_neoadj"]
 SOURCE_TASKS = ["lauren", "her2", "msi", "ebv", "pdl1", "cldn182", "ki67"]
+# 临床 cTNM（可写 cT3 / T3 / t3，统一为 T3；TX/NX/MX 表示无法评估，按缺失处理）
+CT_T_VALUES = ["T1", "T1a", "T1b", "T2", "T3", "T4", "T4a", "T4b", "TX"]
+CT_N_VALUES = ["N0", "N1", "N2", "N3", "N3a", "N3b", "N+", "NX"]
+CT_M_VALUES = ["M0", "M1", "MX"]
+CTNM_COLUMNS = ("ct_t", "ct_n", "ct_m")
 
 # kind: id / center / enum / path_file / path_dir / int / float / binary / text
 COLUMNS: "OrderedDict[str, dict]" = OrderedDict([
@@ -76,6 +81,12 @@ OPTIONAL_COLUMNS: "OrderedDict[str, dict]" = OrderedDict(
         ("tumor_visibility", {"kind": "enum", "values": ["clear", "uncertain", "invisible"]}),
         ("borrmann", {"kind": "enum", "values": ["early", "I", "II", "III", "IV", "V"]}),
         ("ct_series_number", {"kind": "int", "min": 0}),
+        # 治疗前临床分期（结构化）：只用于勾画抽样分层、编码器筛选的辅助参考和 v4 统计分析，不作为模型输入
+        ("ct_t", {"kind": "enum", "values": CT_T_VALUES}),
+        ("ct_n", {"kind": "enum", "values": CT_N_VALUES}),
+        ("ct_m", {"kind": "enum", "values": CT_M_VALUES}),
+        ("ct_stage_source", {"kind": "enum", "values": ["report", "research_read"]}),
+        ("ajcc_edition", {"kind": "int", "min": 6, "max": 9}),
     ]
 )
 
@@ -141,6 +152,10 @@ def _norm_enum(col: str, v: str, values: Sequence[str]) -> Optional[str]:
     s = v.strip().replace("＋", "+")
     if col == "her2_ihc" and s in ("0.0",):
         s = "0"
+    if col in CTNM_COLUMNS:
+        s = s.replace(" ", "")
+        if len(s) > 1 and s[0] in "cC" and s[1] in "TtNnMm":
+            s = s[1:]
     for val in values:
         if s.lower() == val.lower():
             return val

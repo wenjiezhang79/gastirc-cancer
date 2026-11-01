@@ -9,6 +9,12 @@
 ├── ct/stomach/<id>.nii.gz          胃分割（v2 由 TotalSegmentator 生成）
 ├── ct/crops/<规格>/<id>_img.nii.gz 裁剪结果（及 _mask）
 ├── ct/qc/<规格>/<id>.png           单例质控图
+├── ct/seg_sample.csv               v2：人工勾画病例名单（只含 study_id）
+├── ct/nnunet/                      v2：nnU-Net 数据集、推理输入输出、裁剪框
+├── ct/tumor_auto/<id>_tumor.nii.gz v2：自动分割候选（待医生审核）
+├── ct/tumor_reviewed/<id>_tumor.nii.gz v2：医生审核后的分割
+├── ct/features/<编码器>/<id>.h5    v2：CT ROI 特征（tumor / regional）
+├── ct/radiomics/<名称>/            v2：影像组学特征表
 ├── wsi/tiles/<切块规格>/<id>.h5    切块坐标
 ├── wsi/qc/<切块规格>/<id>.png      组织检测与切块质控图
 └── wsi/features/<编码器>/<id>.h5   病理特征
@@ -64,6 +70,27 @@ class WorkPaths:
 
     def ct_qc(self, spec: str, sid: str) -> Path:
         return self.ct / "qc" / spec / f"{sid}.png"
+
+    # ---- CT（v2） ----
+    @property
+    def ct_seg_sample(self) -> Path:
+        return self.ct / "seg_sample.csv"
+
+    @property
+    def ct_nnunet(self) -> Path:
+        return self.ct / "nnunet"
+
+    def ct_tumor_auto(self, sid: str) -> Path:
+        return self.ct / "tumor_auto" / f"{sid}_tumor.nii.gz"
+
+    def ct_tumor_reviewed(self, sid: str) -> Path:
+        return self.ct / "tumor_reviewed" / f"{sid}_tumor.nii.gz"
+
+    def ct_features(self, encoder: str, sid: str) -> Path:
+        return self.ct / "features" / encoder / f"{sid}.h5"
+
+    def ct_radiomics(self, name: str) -> Path:
+        return self.ct / "radiomics" / name
 
     # ---- WSI ----
     @property
