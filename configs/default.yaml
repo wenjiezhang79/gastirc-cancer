@@ -391,6 +391,7 @@ v3:
   model:
     fusion: transformer                # transformer（主模型）/ concat（简单拼接）/ bilinear（门控双线性，Pathomic 式）
     missing: mask                      # mask（主方案：缺失槽位不参与注意力）/ visible（对照：占位 token 参与注意力）
+    skip: true                         # 直通路径（主方案）：输出头同时读取 CLS 与各模态自己的池化 token；false 为消融
     d_model: 128
     n_layers: 1
     n_heads: 4

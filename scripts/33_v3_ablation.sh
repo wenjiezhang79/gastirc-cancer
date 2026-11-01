@@ -14,6 +14,7 @@ add() { NAMES+=("$1"); shift; ARGS+=("$*"); }
 add abl_concat      --set v3.model.fusion=concat
 add abl_bilinear    --set v3.model.fusion=bilinear
 add abl_visible     --set v3.model.missing=visible
+add abl_noskip      --set v3.model.skip=false
 add abl_d256        --set v3.model.d_model=256
 add abl_2layers     --set v3.model.n_layers=2
 # ---- 训练策略 ----

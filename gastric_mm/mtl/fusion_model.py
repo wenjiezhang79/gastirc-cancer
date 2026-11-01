@@ -10,6 +10,9 @@ CT 区域 ROI   → 门控注意力（K=1，来自 v2）→ 1 个 CT token  ─�
 融合方式（``model.fusion``）：
 - ``transformer``（主模型）：缺失槽位按 ``model.missing`` 处理——``mask``（主方案）：不参与注意力（key_padding_mask），
   CLS 只看实际存在的 token；``visible``（对照）：用可学习占位 token 代替并参与注意力；
+  ``model.skip``（直通路径，主方案，2026-11-01 研究者确认）：输出头同时读取 CLS 与各模态自己的池化 token
+  [CLS ; 病理 ; CT]，避免只存在于一种模态的信号（如 MSI 只在病理）在注意力加权平均中被另一模态稀释；
+  mask 模式下缺失模态的池化 token 为零向量（不含可学习的信息），visible 模式下为可学习占位向量。``skip: false`` 为消融；
 - ``concat``（简单拼接对照）：各槽位 token（缺失用占位 token）拼接后直接进输出头；
 - ``bilinear``（门控双线性对照，Pathomic Fusion 式）：病理向量与 CT 向量各自门控、降维、末尾补 1 后做外积，
   再与两个向量拼接进输出头；缺失模态用占位向量。
@@ -101,6 +104,10 @@ class FusionModel(nn.Module):
                              persistent=False)
 
         # ---- 融合层 ----
+        self.skip = bool(mc.get("skip", True)) and self.fusion == "transformer"
+        self.missing_mod = nn.ParameterDict({m: nn.Parameter(torch.zeros(d)) for m in ("path", "ct")})
+        for p in self.missing_mod.values():
+            nn.init.normal_(p, std=0.02)
         if self.fusion == "transformer":
             self.cls = nn.Parameter(torch.zeros(1, 1, d))
             nn.init.normal_(self.cls, std=0.02)
@@ -109,14 +116,11 @@ class FusionModel(nn.Module):
                 raise ValueError(f"d_model={d} 不能被 n_heads={heads} 整除")
             self.layers = nn.ModuleList([TransLayer(d, heads, drop) for _ in range(n_layers)])
             self.final_norm = nn.LayerNorm(d)
-            self.heads = MultiTaskHeads(d, 1, spec, n_bins, drop)
+            self.heads = MultiTaskHeads(d, 3 if self.skip else 1, spec, n_bins, drop)
         elif self.fusion == "concat":
             self.heads = MultiTaskHeads(d, n_slots, spec, n_bins, drop)
         else:  # bilinear
             b = int(mc.get("bilinear_dim", 32))
-            self.missing_mod = nn.ParameterDict({m: nn.Parameter(torch.zeros(d)) for m in ("path", "ct")})
-            for p in self.missing_mod.values():
-                nn.init.normal_(p, std=0.02)
             self.bil_gate = nn.ModuleDict({m: nn.Bilinear(d, d, b) for m in ("path", "ct")})
             self.bil_red = nn.ModuleDict({m: nn.Sequential(nn.Linear(d, b), nn.ReLU()) for m in ("path", "ct")})
             self.bil_out = nn.Sequential(nn.LayerNorm((b + 1) ** 2), nn.Dropout(drop), nn.Linear((b + 1) ** 2, d),
@@ -176,12 +180,14 @@ class FusionModel(nn.Module):
         fill = self.missing_slots[None].to(tokens.dtype).expand_as(tokens)
         return torch.where(present[..., None], tokens, fill)
 
-    def _modality_vector(self, tokens, present, m):
+    def _modality_vector(self, tokens, present, m, zero_if_missing: bool = False):
+        """某模态存在的槽位 token 的平均；该模态缺失时为可学习占位向量（zero_if_missing 时为零向量）。"""
         sel = (self.slot_type == (0 if m == "path" else 1))
-        t, p = tokens[:, sel], present[:, sel].float()
+        t, p = tokens[:, sel], present[:, sel].to(tokens.dtype)
         n = p.sum(1, keepdim=True)
         v = (t * p[..., None]).sum(1) / n.clamp(min=1)
-        return torch.where(n > 0, v, self.missing_mod[m][None].to(v.dtype).expand_as(v))
+        fill = torch.zeros_like(v) if zero_if_missing else self.missing_mod[m][None].to(v.dtype).expand_as(v)
+        return torch.where(n > 0, v, fill)
 
     def forward(self, batch: dict) -> Dict[str, torch.Tensor]:
         tokens, present, attn = self.encode(batch)
@@ -199,7 +205,13 @@ class FusionModel(nn.Module):
             for i, layer in enumerate(self.layers):
                 seq, w = layer(seq, kpm, need_weights=(i == len(self.layers) - 1))
             z = self.final_norm(seq[:, 0])
-            out = self.heads(z[:, None])
+            if self.skip:                                              # 直通路径：[CLS ; 病理 ; CT]
+                zm = self.missing_mode == "mask"
+                vp = self._modality_vector(tokens, present, "path", zero_if_missing=zm)
+                vc = self._modality_vector(tokens, present, "ct", zero_if_missing=zm)
+                out = self.heads(torch.stack([z, vp.to(z.dtype), vc.to(z.dtype)], 1))
+            else:
+                out = self.heads(z[:, None])
             cls_w = w[:, 0, 1:].float()                                # 最后一层 CLS 对各槽位的注意力（头平均）
             cls_w = cls_w / cls_w.sum(1, keepdim=True).clamp(min=1e-12)  # 归一化为各槽位的占比（不含 CLS 自身）
             for j, (r, k) in enumerate(self.slots):

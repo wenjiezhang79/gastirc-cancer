@@ -143,11 +143,11 @@ def _spec():
     return TaskSpec(multiclass={"lauren": 3}, binary=["msi_h"], survival=["os"])
 
 
-def _model(fusion, missing="mask", aux=False):
+def _model(fusion, missing="mask", aux=False, skip=True):
     from gastric_mm.mtl.fusion_model import FusionModel
     torch.manual_seed(0)
     return FusionModel({"path": 8, "tumor": 6, "regional": 6},
-                       {"fusion": fusion, "missing": missing, "d_model": 16, "n_heads": 4, "dropout": 0.0,
+                       {"fusion": fusion, "missing": missing, "skip": skip, "d_model": 16, "n_heads": 4, "dropout": 0.0,
                         "aux_heads": aux, "path": {"hidden_dim": 12, "attn_dim": 8, "n_branches": 2},
                         "ct": {"hidden_dim": 10, "attn_dim": 8}}, _spec(), 4)
 
@@ -162,10 +162,13 @@ def _batch(B=3):
                         "regional": torch.tensor([True, False, True])}}
 
 
-@pytest.mark.parametrize("fusion,missing", [("transformer", "mask"), ("transformer", "visible"), ("concat", "mask"),
-                                            ("bilinear", "mask")])
-def test_fusion_model_missing_and_padding_invariance(fusion, missing):
-    m = _model(fusion, missing).eval()
+@pytest.mark.parametrize("fusion,missing,skip", [("transformer", "mask", True), ("transformer", "mask", False),
+                                                 ("transformer", "visible", True), ("concat", "mask", True),
+                                                 ("bilinear", "mask", True)])
+def test_fusion_model_missing_and_padding_invariance(fusion, missing, skip):
+    m = _model(fusion, missing, skip=skip).eval()
+    if fusion == "transformer":
+        assert m.heads.trunk[1].in_features == m.d_model * (3 if skip else 1)
     b1 = _batch()
     b2 = {k: dict(v) for k, v in b1.items()}
     b2["x"] = {r: v.clone() for r, v in b1["x"].items()}
@@ -376,6 +379,7 @@ def test_experiment_config_guard(v3_trained):
     ("v_concat", ["--set", "v3.model.fusion=concat"]),
     ("v_bilinear", ["--set", "v3.model.fusion=bilinear"]),
     ("v_visible", ["--set", "v3.model.missing=visible"]),
+    ("v_noskip", ["--set", "v3.model.skip=false"]),
     ("v_aux", ["--set", "v3.model.aux_heads=true"]),
     ("v_tumoronly", ["--set", "v3.ct_rois=[tumor]"]),
     ("v_scratch", ["--set", "v3.init.path_exp=null", "--set", "v3.init.ct_exp=null"]),
