@@ -117,3 +117,179 @@
    安装包可在联网电脑上准备后传到服务器（`docs/v2_offline_setup.md`）。
 8. **v1 代码不修改：** v2 新建通用 token 多任务框架（`gastric_mm/mtl/`），只导入 v1 的输出头、损失、标签构建、生存时间段与评估函数；
    v1 实验指纹不受新增 v2 配置的影响（有测试保证）。
+
+## 十四、v3 融合方案草案（2026-11-01 起草，**待研究者确认，确认前不写代码**）
+
+> 给新会话的说明：本节是上一个会话与研究者讨论后整理的 v3 草案。新会话请先读完 `CLAUDE.md` 与本文件，
+> 再根据本节给出**实现计划**；第 13 小节"待确认问题"须先与研究者确认。确认后把本节标题改为"v3 实现约定（日期 确认）"，
+> 并把确认结果写入第 13 小节。
+
+### 1. 目标与前提
+
+- 在内部训练集 5 折交叉验证上训练"病理 + CT"融合多任务模型，证明融合**明显优于**最佳单模态（v1 病理、v2 CT）和后期融合（CLAUDE.md 6.3）。
+- **输入全部来自 v1 / v2 已有的产物，不重新提特征：**
+  - 病理特征：`work/wsi/features/<编码器>/<study_id>.h5`（v1 编码器初筛选定后锁定）；
+  - CT 特征：`work/ct/features/<编码器>/<study_id>.h5`，每个 ROI（tumor / regional）一个 `[n, D]` 数据集（v2 编码器初筛选定后锁定）；
+  - 单模态模型：v1 实验 `outputs/path_mtl/<实验名>/seed<s>/fold<k>/model.pt` 与 `case_ids.json`；
+    v2 实验 `outputs/ct_mtl/<实验名>/seed<s>/fold<k>/model.pt` 与 `case_ids.json`（用于初始化与防泄漏检查）。
+- 三者必须使用**同一个划分文件**（实验指纹中含划分配置；程序须核对 v1 / v2 实验的折号与当前划分一致，不一致直接报错）。
+- 真实数据上，v3 要等 v1、v2 的编码器选定、单模态模型训练完成后才能运行；开发阶段用多模态假特征队列
+  （`fake_data --mm-cohort`）以及在其上训练的假 v1 / v2 实验。
+
+### 2. 代码组织（复用，不另起炉灶）
+
+- 在 v2 的通用 token 框架 `gastric_mm/mtl/` 上扩展：
+  - `mtl/data.py` 增加病理特征仓库适配（包装 v1 的 `training/bag_dataset.FeatureStore`，角色名 `path`，返回 `[N_切块, D]`），
+    与 `CTFeatureStore` 接口一致（`roles / available / load / dims`）；`TokenDataset` 增加**按模态分组的丢弃**；
+  - 新增 `mtl/fusion_model.py`：病理分支 + CT 分支 + 融合层 + 多任务输出头；
+  - 训练循环直接用 `mtl/trainer.train_one`（已支持 `model_factory`）；汇总用 `mtl/experiment.aggregate`、`safe_evaluate`。
+- 新增命令行包 `gastric_mm/fusion/`：`train.py`、`late.py`（后期融合）、`compare.py`（跨命名空间比较）、`predict.py`（最终评估）。
+- 实验目录 `outputs/fusion/<实验名>/`，结构与 v1 / v2 一致（`seed*/fold*/`、`oof_predictions.csv`、`cv_report.md`、`postprocess.json` 等）。
+- **v1 文件不修改**（只导入）。v2 的 `mtl/` 可以扩展，但 v2 的测试必须全部通过、v2 实验指纹不变（与 v1 一样加测试保证）。
+- 配置新增 `v3:` 一节，不改 `v1:`、`v2:`。
+
+### 3. 病例池与划分
+
+- 病例池 = 内部训练集中**至少有一种模态特征**的病例；两种都没有的不进模型，报告中列出人数。
+- 折号直接用划分文件；报告中按"两种都有 / 只有病理 / 只有 CT"列出各折例数。
+- 内部测试集与外部队列：训练代码不读取（与 v1 / v2 相同，有测试保证）。
+
+### 4. 模型结构
+
+```
+病理切块特征 → 门控 ABMIL（K=2，来自 v1）→ 2 个病理 token ─┐
+CT 肿瘤 ROI   → 门控注意力（K=1，来自 v2）→ 1 个 CT token  ─┼→ 各自线性投影到 d_model
+CT 区域 ROI   → 门控注意力（K=1，来自 v2）→ 1 个 CT token  ─┘
+[CLS] + 4 个 token + 模态类型嵌入（path / ct）+ 槽位嵌入 → 1–2 层 Transformer（4 头，pre-LN）→ CLS → 多任务输出头
+```
+
+- 默认 d_model = 128、1 层；256 维与 2 层作为消融。
+- 输出头与损失完全复用 v1 / v2：Lauren 三分类、标志物多标签二分类（缺失屏蔽、正样本加权）、离散时间生存
+  （手术 / 不可切除各设基线、共享风险评分）、不确定性加权；任务定义来自 `v3.tasks`（默认同 v1）。
+- **缺失模态：** 缺失的槽位填可学习占位 token；是否参与注意力见待确认问题 1（草案倾向：用 key_padding_mask 屏蔽）。
+  单个 ROI 缺失（如只有区域 ROI）同样逐槽位处理。
+- **模态丢弃：** 两种模态都有的训练病例，以 `v3.train.modality_dropout`（默认 0.3）的概率随机丢掉其中一种（各 50%），
+  永远不会两种都丢；CT 内部的 ROI 丢弃沿用 v2（0.1）。
+- **简单拼接对照：** `v3.model.fusion=concat`，跳过 Transformer，全部 token 拼接后直接进输出头（同一套代码）。
+- **保存：** 折外预测（含 `has_path / has_tumor / has_regional`）、CLS 嵌入、CLS 对各 token 的注意力（看模态贡献）、
+  病理切块注意力（热图）、CT 各层注意力。
+
+### 5. 训练
+
+- **单模态初始化（CLAUDE.md 6.5 第 15 条"先单模态训练，再初始化融合模型"）：**
+  - 融合模型第 k 折、种子 s：病理分支加载 v1 实验（`v3.init.path_exp`）同种子、同折模型的聚合器参数；
+    CT 分支加载 v2 实验（`v3.init.ct_exp`）同种子、同折模型的各 ROI 分支参数。对应种子不存在时直接报错（不悄悄换种子）。
+  - 加载时核对编码器名与特征维数一致（v1 模型文件里有 `encoders`，v2 模型文件里有 `encoder`、`rois`）。
+- **防泄漏检查（必须）：** 读取 v1 / v2 该折的 `case_ids.json`，若其 train 或 inner_val 中出现融合模型第 k 折的留出病例，直接报错。
+- **内层验证集（早停）：** 草案：融合的内层验证 = （v1 该折 inner_val ∪ v2 该折 inner_val）∩ 病例池，其余为训练部分。
+  说明：一个初始化模型的训练集可能含另一个模型的内层验证病例，早停略偏乐观；**留出折不受影响**，交叉验证结果仍无偏。见待确认问题 4。
+- **学习率：** 预训练分支 `v3.train.branch_lr_mult`（默认 0.1），融合层与输出头为全学习率；可选前 `freeze_epochs` 个 epoch 冻结分支。
+  "从头训练"（不初始化）作为消融。是否冻结病理分支见待确认问题 2。
+- 其余与 v1 / v2 相同：AdamW + 预热 + 余弦退火、BF16、梯度裁剪与累积、内层验证总损失早停（patience 10）、
+  5 折 × 种子、两张卡分折并行、实验配置指纹保护。最终模型 = 5 折（× 种子）集成。
+- 显存：病理每例最多 2048 个切块（`v1.train.max_tiles` 的同名设置放在 `v3.train`），40GB 单卡足够。
+
+### 6. 对照与消融
+
+| 类别 | 内容 |
+|---|---|
+| 最佳单模态 | v1 病理实验、v2 CT 实验的折外预测（直接读取，不重训） |
+| 后期融合 | 每个任务：两模态折外 logit 平均（不拟合）；另做交叉拟合堆叠（第 k 折的组合系数只用其他折的折外预测拟合；二分类 / 多分类用逻辑回归，生存用风险 z 分数平均或 Cox）。只有一种模态时用该模态的预测。最终评估时用全部折外预测拟合一次后冻结。输出与普通实验相同格式（`outputs/fusion/<名>/oof_predictions.csv`，`experiment.json` 中 kind=late），可直接参与比较 |
+| 融合结构 | Transformer vs 简单拼接；1 层 vs 2 层；128 vs 256 维 |
+| 训练策略 | 模态丢弃开 / 关；单模态初始化 vs 从头训练；微调 vs 冻结分支；不确定性加权 vs 固定权重 |
+| 单任务 | 主分析任务（Lauren、HER2、MSI、EBV、PD-L1 CPS≥5、Claudin18.2、OS）各一个单任务融合模型（必做） |
+| 缺失鲁棒性 | 对两种模态都有的病例，在折外预测时分别人为去掉 CT、去掉病理，报告指标下降幅度 |
+
+### 7. 评估与报告
+
+- 交叉验证报告：同 v1 / v2（折外指标 + bootstrap 95% CI、各折均值 ± 标准差、各种子）；**另按模态可用性分层**
+  （两种都有 / 只有病理 / 只有 CT）报告。
+- **比较（`fusion/compare.py`）：** 可同时列出 `path_mtl`、`ct_mtl`、`fusion` 三个命名空间的实验与后期融合实验；
+  在共同病例上计算，配对 bootstrap 差值；同时报告在全部病例上的结果。
+- **"融合明显超过"的判定规则须预先规定**（待确认问题 3），写进配置 `v3.compare` 并在报告中注明。
+- 阈值、风险截断：由融合模型折外预测确定后冻结（`postprocess.json`）。
+- 最终评估（`fusion/predict.py --final`）：登记模型指纹、同一模型同一队列不重复运行；外部队列按中心报告并另报合并结果
+  （MSI、EBV 阳性少，合并结果为主要参考）；均按模态可用性分层。最终评估时可以一起评估最终模型与各对照模型。
+
+### 8. 配置草案（`v3:` 一节）
+
+```yaml
+v3:
+  path_encoders: [uni2_h]          # 与 v1 选定的编码器一致
+  ct_encoder: radimagenet_r50      # 与 v2 选定的编码器一致
+  ct_rois: [tumor, regional]
+  init:
+    path_exp: null                 # v1 实验名（outputs/path_mtl/<名>）；null = 病理分支从头训练
+    ct_exp: null                   # v2 实验名（outputs/ct_mtl/<名>）；null = CT 分支从头训练
+  model:
+    fusion: transformer            # transformer / concat
+    d_model: 128
+    n_layers: 1
+    n_heads: 4
+    dropout: 0.25
+    missing: mask                  # mask（占位 token 不参与注意力）/ visible（待确认问题 1）
+  tasks: {同 v1}
+  population_baselines: [os]
+  loss: {同 v1}
+  train:
+    epochs: 50
+    batch_size: 8
+    lr: 2.0e-4
+    branch_lr_mult: 0.1
+    freeze_epochs: 0
+    freeze_branches: false         # 待确认问题 2
+    modality_dropout: 0.3
+    roi_dropout: 0.1
+    max_tiles: 2048
+    tile_dropout: 0.1
+    inner_val_fraction: 0.15       # 只用于没有 v1/v2 内层验证名单可沿用的病例
+    patience: 10
+    precision: bf16
+  seeds: [0]
+  compare:
+    primary: [lauren, her2_pos, msi_h, ebv_pos, pdl1_cps5, cldn182_pos, os]
+    rule: ci_lower_gt_0            # 待确认问题 3
+```
+
+### 9. 假数据与测试
+
+- 假数据：直接用 `fake_data --mm-cohort`（已埋入互补信号：预后 = 病理部分 + CT 部分；MSI 只在病理；cT 只在 CT 区域 ROI；
+  Lauren 两边都有；CT 缺失约 12%、单 ROI 缺失少量）。测试中先在其上训练假 v1 实验（uni2_h）与假 v2 实验（fake_ct_a），再训练融合。
+- 测试至少覆盖：
+  - 补零不变性、缺失槽位内容不影响输出（mask 模式）、模态丢弃永远不会两种都丢；
+  - 初始化：参数确实从 v1 / v2 模型加载（数值相同）、种子缺失或编码器不一致时报错、**防泄漏检查会报错**；
+  - 交叉验证跑通，且在假数据上融合的 OS C-index 高于单模态（互补信号）；
+  - 训练代码不读取测试集与外部队列（spy 检查）；保存—加载后预测一致；实验指纹保护；
+  - 后期融合交叉拟合不使用本折数据；跨命名空间比较；`--final` 保护与外部按中心、按模态可用性报告；
+  - v1、v2 原有测试全部通过；v1、v2 实验指纹不受新增 `v3:` 配置影响。
+
+### 10. 脚本（30 号段）
+
+`30_v3_train.sh`（融合训练）、`31_v3_late_fusion.sh`（后期融合）、`32_v3_ablation.sh`（消融全套）、`33_v3_compare.sh`（比较报告）、
+`34_v3_predict.sh`（最终评估）、`run_v3_demo.sh`（假数据全流程演示）。
+
+### 11. 开发顺序
+
+1. 病理仓库适配与按模态分组的丢弃（`mtl/data.py`），回归测试 v2；
+2. 融合模型（`mtl/fusion_model.py`）与单元测试；
+3. 单模态初始化与防泄漏检查、内层验证名单；
+4. 融合训练命令行与汇总（按模态可用性分层）；
+5. 后期融合与跨命名空间比较；
+6. 最终评估；
+7. 消融脚本、演示脚本、文档；更新 `CLAUDE.md` 第 8 节与本节。
+
+### 12. 研究者需要提供 / 确认的信息（真实数据阶段）
+
+- v1 选定的病理编码器与最终实验名（`v3.init.path_exp`）；v2 选定的 CT 编码器与最终实验名（`v3.init.ct_exp`）；
+- 两者使用的随机种子列表（融合沿用）。
+
+### 13. 待确认问题（新会话须先与研究者确认）
+
+1. **缺失模态是否让模型"知道缺了"：** 屏蔽（占位 token 不参与注意力，只用实际存在的模态；草案倾向，理由是缺失往往与中心、
+   人群有关，模型可能把"缺没缺"当成捷径，到外部中心失效）；还是可见（占位 token 参与注意力）。另一种作为可配置的对照。
+2. **病理分支：** 从 v1 初始化后以 0.1 倍学习率微调（草案倾向），还是冻结、直接用 v1 的病理 token？CT 分支同样的问题。
+3. **"融合明显超过"的预先判定规则：** 草案：主分析任务（Lauren、HER2、MSI、EBV、PD-L1 CPS≥5、Claudin18.2、OS）主要指标的平均，
+   融合减最佳单模态、融合减后期融合，两个配对 bootstrap 差值的 95% CI 下限都 > 0；各任务的差值只作参考。还是按单个任务判定？
+4. **内层验证名单：** 草案为 v1 与 v2 内层验证名单的并集（见第 5 小节说明）；或者重新分层抽 15%（更简单，但初始化模型
+   见过部分内层验证病例的比例更高）。
+5. 默认结构（d_model 128、1 层 Transformer）与模态丢弃概率 0.3 是否同意。

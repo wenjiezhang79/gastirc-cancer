@@ -148,7 +148,8 @@
   - 外部工具在测试与演示中用 `gastric_mm/fake_tools/` 的假命令代替；脚本 `20_`–`28_`、`run_v2_demo.sh`；离线准备 `docs/v2_offline_setup.md`
   - 待服务器验证：TotalSegmentator / nnU-Net / pyradiomics 环境；各 3D 编码器与 RadImageNet 用 3–5 例与官方代码核对；显存与速度
   - 已修复（2026-11-01，经研究者同意改动 v1 公共代码）：`metrics._clean` 等在某组某任务无标签时报错（如外部某中心没有不可切除患者 → 无 PFS），现返回 NaN；影响 v1 外部队列按中心报告，不改变任何已有结果
-- [ ] v3 融合 / v4 评估统计
+- [ ] **v3 融合**：方案草案见 `docs/decisions.md` 第十四节（待研究者确认第 13 小节的问题后再写代码）
+- [ ] v4 评估统计
 
 ## 9. 评估规范
 
