@@ -649,7 +649,7 @@ def _fake_v4_clinical(rng, pop: str, ti: int, msi: int, lauren: int, z: float) -
             reg = str(rng.choice(["chemo", "chemoradio", "chemo_io"], p=[0.6, 0.1, 0.3]))
             out["neoadj_regimen"] = reg
             io = int(reg == "chemo_io")
-            p_pcr = 1 / (1 + np.exp(-(-2.0 + 1.6 * msi + 0.9 * (lauren == 0) + 0.7 * io)))
+            p_pcr = 1 / (1 + np.exp(-(-2.2 + 2.5 * msi + 1.6 * (lauren == 0) + 0.7 * io)))
             pcr = int(rng.rand() < p_pcr)
             out["pcr"] = str(pcr)
             out["trg"] = "0" if pcr else str(int(rng.choice([1, 2, 3], p=[0.3, 0.4, 0.3])))

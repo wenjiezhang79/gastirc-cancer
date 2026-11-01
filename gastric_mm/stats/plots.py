@@ -1,6 +1,7 @@
 """论文用图（matplotlib，无界面后端）：ROC、带风险人数表的 KM 曲线、森林图、校准曲线、决策曲线、列线图。
 
 每个函数把图保存为 PNG（300 dpi）与 PDF；文件名由调用方给出（只用 study_id 或任务名，不含任何病人信息）。
+图中文字默认英文（投稿用，也避免服务器缺中文字体时出现方框）；``set_language("zh")`` 改为中文（需要系统有中文字体）。
 """
 
 from __future__ import annotations
@@ -13,6 +14,26 @@ import numpy as np
 from .survival import kaplan_meier, n_at_risk
 
 COLORS = ["#1f4e79", "#c0392b", "#2e8b57", "#8e44ad", "#d68910", "#566573"]
+_LANG = {"value": "en"}
+
+
+def set_language(lang: str) -> None:
+    """图中文字语言：en（默认）/ zh。"""
+    _LANG["value"] = "zh" if str(lang).lower().startswith("zh") else "en"
+
+
+def tr(zh: str, en: str) -> str:
+    return zh if _LANG["value"] == "zh" else en
+
+
+def cjk_font_available() -> bool:
+    try:
+        from matplotlib import font_manager
+        names = {f.name for f in font_manager.fontManager.ttflist}
+        return any(n in names for n in ("Noto Sans CJK SC", "WenQuanYi Micro Hei", "SimHei", "Source Han Sans SC",
+                                         "Microsoft YaHei", "PingFang SC"))
+    except Exception:
+        return False
 
 
 def _plt():
@@ -57,19 +78,21 @@ def roc_plot(curves: Sequence[Tuple[str, np.ndarray, np.ndarray]], path: Path, t
         ax.plot(fpr, tpr, color=COLORS[k % len(COLORS)], lw=1.4,
                 label=f"{name}  AUC {a['auc']:.3f} ({a['lo']:.3f}–{a['hi']:.3f})")
     ax.plot([0, 1], [0, 1], color="#aaaaaa", lw=0.8, ls="--")
-    ax.set_xlabel("1 − 特异度")
-    ax.set_ylabel("敏感度")
+    ax.set_xlabel(tr("1 − 特异度", "1 − Specificity"))
+    ax.set_ylabel(tr("敏感度", "Sensitivity"))
     ax.set_title(title)
     ax.legend(loc="lower right", fontsize=7, frameon=False)
     return _save(fig, path)
 
 
-def km_plot(groups: Dict[str, Tuple[np.ndarray, np.ndarray]], path: Path, title: str = "", xlabel: str = "时间（月）",
-            ylabel: str = "生存率", risk_times: Optional[Sequence[float]] = None, annotation: str = "") -> List[Path]:
+def km_plot(groups: Dict[str, Tuple[np.ndarray, np.ndarray]], path: Path, title: str = "", xlabel: Optional[str] = None,
+            ylabel: Optional[str] = None, risk_times: Optional[Sequence[float]] = None, annotation: str = "") -> List[Path]:
     """groups：{组名: (time, event)}；下方附各时间点的风险人数表。"""
+    xlabel = xlabel or tr("时间（月）", "Time (months)")
+    ylabel = ylabel or tr("生存率", "Survival probability")
     plt = _plt()
     fig = plt.figure(figsize=(4.2, 3.9))
-    ax = fig.add_axes([0.14, 0.33, 0.82, 0.6])
+    ax = fig.add_axes([0.16, 0.36, 0.8, 0.57])
     tmax = max((float(np.nanmax(t)) for t, _ in groups.values() if len(t)), default=1.0)
     risk_times = list(risk_times) if risk_times is not None else list(np.linspace(0, tmax, 6).round(0))
     for k, (name, (t, e)) in enumerate(groups.items()):
@@ -77,33 +100,36 @@ def km_plot(groups: Dict[str, Tuple[np.ndarray, np.ndarray]], path: Path, title:
             continue
         km = kaplan_meier(t, e)
         c = COLORS[k % len(COLORS)]
-        ax.step(km.time, km.surv, where="post", color=c, lw=1.4, label=f"{name}（n={len(t)}）")
-        ax.fill_between(km.time, km.lo, km.hi, step="post", color=c, alpha=0.12, lw=0)
+        tend = float(np.max(t))                       # 曲线延伸到最后一次随访（删失标记不悬空）
+        xs, ys = np.r_[km.time, tend], np.r_[km.surv, km.surv[-1]]
+        ax.step(xs, ys, where="post", color=c, lw=1.4, label=f"{name} (n={len(t)})")
+        ax.fill_between(xs, np.r_[km.lo, km.lo[-1]], np.r_[km.hi, km.hi[-1]], step="post", color=c, alpha=0.12, lw=0)
         cens = np.asarray(t)[np.asarray(e) == 0]
         ax.plot(cens, [km.at(x) for x in cens], "|", color=c, ms=5, mew=0.8)
     ax.set_ylim(0, 1.02)
     ax.set_xlim(0, tmax)
+    ax.set_xticks([x for x in risk_times if x <= tmax])     # 横轴刻度与风险人数表对齐
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.legend(loc="lower left", fontsize=7, frameon=False)
     if annotation:
         ax.text(0.98, 0.95, annotation, transform=ax.transAxes, ha="right", va="top", fontsize=7)
-    tab = fig.add_axes([0.14, 0.05, 0.82, 0.18])
+    tab = fig.add_axes([0.16, 0.03, 0.8, 0.16])
     tab.axis("off")
     names = list(groups)
-    tab.text(-0.02, 1.0, "风险人数", transform=tab.transAxes, ha="right", va="top", fontsize=7)
+    tab.text(-0.07, 1.0, tr("风险人数", "No. at risk"), transform=tab.transAxes, ha="right", va="top", fontsize=7)
     for k, name in enumerate(names):
         t, _ = groups[name]
         y = 0.75 - k * 0.3
-        tab.text(-0.02, y, name, transform=tab.transAxes, ha="right", va="center", fontsize=7,
+        tab.text(-0.07, y, name, transform=tab.transAxes, ha="right", va="center", fontsize=7,
                  color=COLORS[k % len(COLORS)])
         for x, n in zip(risk_times, n_at_risk(t, risk_times)):
             tab.text(x / tmax if tmax else 0, y, str(n), transform=tab.transAxes, ha="center", va="center", fontsize=7)
-    tab.text(0.5, -0.25, xlabel, transform=tab.transAxes, ha="center", fontsize=8)
+    ax.set_xlabel(xlabel)
     return _save(fig, path)
 
 
-def forest_plot(rows: Sequence[dict], path: Path, title: str = "", xlabel: str = "HR（95% CI）") -> List[Path]:
+def forest_plot(rows: Sequence[dict], path: Path, title: str = "", xlabel: str = "HR (95% CI)") -> List[Path]:
     """rows：[{label, hr, lo, hi, n?, note?}]；对数坐标。"""
     plt = _plt()
     rows = [r for r in rows if r.get("hr") is not None]
@@ -120,15 +146,17 @@ def forest_plot(rows: Sequence[dict], path: Path, title: str = "", xlabel: str =
     ax.axvline(1.0, color="#999999", lw=0.8, ls="--")
     ax.set_xscale("log")
     ax.set_yticks(range(len(rows), 0, -1))
-    ax.set_yticklabels([f"{r['label']}" + (f"（n={r['n']}）" if r.get("n") is not None else "") for r in rows], fontsize=7)
+    ax.set_yticklabels([f"{r['label']}" + (f" (n={r['n']})" if r.get("n") is not None else "") for r in rows], fontsize=7)
     ax.set_xlabel(xlabel)
     ax.set_title(title)
     return _save(fig, path)
 
 
-def calibration_plot(series: Sequence[Tuple[str, list]], path: Path, title: str = "", xlabel: str = "预测概率",
-                     ylabel: str = "实际比例") -> List[Path]:
+def calibration_plot(series: Sequence[Tuple[str, list]], path: Path, title: str = "", xlabel: Optional[str] = None,
+                     ylabel: Optional[str] = None) -> List[Path]:
     """series：[(名称, [{pred, obs, lo, hi}])]。"""
+    xlabel = xlabel or tr("预测概率", "Predicted probability")
+    ylabel = ylabel or tr("实际比例", "Observed proportion")
     plt = _plt()
     fig, ax = plt.subplots(figsize=(3.4, 3.4))
     for k, (name, pts) in enumerate(series):
@@ -160,12 +188,12 @@ def dca_plot(curves: Dict[str, "object"], path: Path, title: str = "", max_thres
         ref = d
         lo_y = min(lo_y, float(d.model.min()))
     if ref is not None:
-        ax.plot(ref.threshold, ref.treat_all, color="#888888", lw=0.9, ls="--", label="全部处理")
-        ax.plot(ref.threshold, ref.treat_none, color="#444444", lw=0.9, ls=":", label="全部不处理")
+        ax.plot(ref.threshold, ref.treat_all, color="#888888", lw=0.9, ls="--", label=tr("全部处理", "Treat all"))
+        ax.plot(ref.threshold, ref.treat_none, color="#444444", lw=0.9, ls=":", label=tr("全部不处理", "Treat none"))
         top = max(float(ref.treat_all.max()), max(float(df.model.max()) for df in curves.values()))
         ax.set_ylim(max(-0.05, lo_y - 0.02), top * 1.1 + 1e-3)
-    ax.set_xlabel("阈值概率")
-    ax.set_ylabel("净获益")
+    ax.set_xlabel(tr("阈值概率", "Threshold probability"))
+    ax.set_ylabel(tr("净获益", "Net benefit"))
     ax.set_title(title)
     ax.legend(fontsize=7, frameon=False)
     return _save(fig, path)
@@ -188,7 +216,7 @@ def nomogram_plot(terms: Sequence[dict], horizons: Sequence[float], base_surv: D
     ax.plot([0, 100], [y, y], color="k", lw=0.8)
     for p in range(0, 101, 10):
         ax.text(p, y + 0.25, str(p), ha="center", fontsize=6)
-    ax.text(-3, y, "分数", ha="right", va="center", fontsize=8)
+    ax.text(-3, y, tr("分数", "Points"), ha="right", va="center", fontsize=8)
     mins = []
     for tm in terms:
         y -= 1
@@ -206,7 +234,7 @@ def nomogram_plot(terms: Sequence[dict], horizons: Sequence[float], base_surv: D
     ax.plot([0, 100], [y, y], color="k", lw=0.8)
     for p in np.linspace(0, total_max, 6):
         ax.text(p / total_max * 100, y - 0.32, f"{p:.0f}", ha="center", fontsize=6)
-    ax.text(-3, y, "总分", ha="right", va="center", fontsize=8)
+    ax.text(-3, y, tr("总分", "Total points"), ha="right", va="center", fontsize=8)
     lp_min = float(np.sum(mins))
     for h in horizons:
         y -= 1
@@ -221,7 +249,7 @@ def nomogram_plot(terms: Sequence[dict], horizons: Sequence[float], base_surv: D
             if 0 <= pos <= 100:
                 ax.plot([pos, pos], [y, y + 0.12], color="k", lw=0.6)
                 ax.text(pos, y - 0.32, f"{prob:.1f}", ha="center", fontsize=6)
-        ax.text(-3, y, f"{h:g} 个月生存率", ha="right", va="center", fontsize=8)
+        ax.text(-3, y, tr(f"{h:g} 个月生存率", f"{h:g}-month survival"), ha="right", va="center", fontsize=8)
     ax.set_xlim(-30, 105)
     ax.set_ylim(y - 1, n_rows + 1)
     ax.set_title(title)
