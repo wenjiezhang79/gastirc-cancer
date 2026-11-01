@@ -87,6 +87,18 @@ OPTIONAL_COLUMNS: "OrderedDict[str, dict]" = OrderedDict(
         ("ct_m", {"kind": "enum", "values": CT_M_VALUES}),
         ("ct_stage_source", {"kind": "enum", "values": ["report", "research_read"]}),
         ("ajcc_edition", {"kind": "int", "min": 6, "max": 9}),
+        # v4 起：治疗信息与新辅助疗效（只用于统计分析，不作为任何模型的输入；见 docs/decisions.md 第十五节第 4 小节）
+        ("adj_chemo", {"kind": "binary"}),
+        ("first_line", {"kind": "enum", "values": ["none", "chemo", "chemo_her2", "chemo_io", "chemo_cldn", "other"]}),
+        ("neoadj_regimen", {"kind": "enum", "values": ["chemo", "chemoradio", "chemo_io"]}),
+        ("immuno_setting", {"kind": "enum", "values": ["neoadj", "adjuvant", "first_line", "later_line"]}),
+        ("trg", {"kind": "int", "min": 0, "max": 3}),
+        ("pcr", {"kind": "binary"}),
+        ("adj_rt", {"kind": "binary"}),
+        ("surgery_type", {"kind": "enum", "values": ["total", "distal", "proximal", "other"]}),
+        ("d2", {"kind": "binary"}),
+        ("n_lines", {"kind": "int", "min": 0, "max": 10}),
+        ("diag_year", {"kind": "int", "min": 1990, "max": 2100}),
     ]
 )
 
