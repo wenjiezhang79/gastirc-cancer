@@ -35,11 +35,14 @@ def class_weights(labels: pd.DataFrame, spec: TaskSpec, enabled: bool) -> Dict[s
     return out
 
 
-def make_loader(sids, stores, roles, dims, targets, sec, train: bool, batch_size: int) -> DataLoader:
+def make_loader(sids, stores, roles, dims, targets, sec, train: bool, batch_size: int,
+                ds_kwargs: Optional[dict] = None) -> DataLoader:
+    """ds_kwargs：模型额外的数据增强参数（v3 融合模型的模态丢弃等，由 model.dataset_kwargs 给出），只在训练时使用。"""
     tc = sec.train
     ds = TokenDataset(sids, stores, train=train,
                       slice_dropout=float(tc.get("slice_dropout", 0.0)) if train else 0.0,
-                      roi_dropout=float(tc.get("roi_dropout", 0.0)) if train else 0.0)
+                      roi_dropout=float(tc.get("roi_dropout", 0.0)) if train else 0.0,
+                      **(ds_kwargs if train and ds_kwargs else {}))
     return DataLoader(ds, batch_size=batch_size, shuffle=train, num_workers=int(tc.get("num_workers", 0)),
                       collate_fn=make_token_collate(roles, dims, targets), drop_last=False)
 
@@ -47,7 +50,15 @@ def make_loader(sids, stores, roles, dims, targets, sec, train: bool, batch_size
 def train_one(sec, spec: TaskSpec, stores: Sequence, model_factory: Callable[[int], torch.nn.Module],
               lab_tr: pd.DataFrame, lab_va: pd.DataFrame, device: torch.device, seed: int, logger,
               log_prefix: str = "") -> Tuple[torch.nn.Module, dict, List[dict]]:
-    """sec：配置节（如 cfg.v2）；model_factory(n_bins) 返回未训练的模型（须有 .heads 与 .roles）。"""
+    """sec：配置节（如 cfg.v2）；model_factory(n_bins) 返回未训练的模型（须有 .heads 与 .roles）。
+
+    v3 融合模型可选提供以下钩子（v2 模型没有这些属性，行为不变）：
+    - ``branch_prefixes``：分支参数名前缀；这些参数的学习率 = lr × sec.train.branch_lr_mult；
+      ``sec.train.freeze_branches`` = true 时全程冻结分支，``freeze_epochs`` > 0 时前若干 epoch 冻结；
+    - ``set_branches_frozen(bool)``：冻结 / 解冻分支（冻结时分支处于 eval 模式）；
+    - ``aux_heads``（ModuleDict）与 ``aux_losses(out, loss_fn)``：单模态辅助头的损失（只加在训练损失上，不参与早停监测）；
+    - ``dataset_kwargs(train_cfg)``：训练时的额外数据增强参数（模态丢弃等）。
+    """
     tc, lc = sec.train, sec.loss
     set_seed(seed)
     n_bins = int(lc.get("survival_bins", 4))
@@ -64,22 +75,58 @@ def train_one(sec, spec: TaskSpec, stores: Sequence, model_factory: Callable[[in
 
     model = model_factory(n_bins)
     roles, dims = model.roles, model.in_dims
+    aux_heads = getattr(model, "aux_heads", None) or {}
     for ep in spec.survival:
         init = np.stack([empirical_hazard_logits(tg_tr[f"bin:{ep}"][tg_tr[f"pop:{ep}"] == p],
                                                  tg_tr[f"event:{ep}"][tg_tr[f"pop:{ep}"] == p], n_bins)
                          for p in range(spec.n_pops(ep))])
         model.heads.init_baseline(ep, torch.tensor(init, dtype=torch.float32))
+        for h in aux_heads.values():
+            h.init_baseline(ep, torch.tensor(init, dtype=torch.float32))
     model.to(device)
     weighter = LossWeighter(spec.all_tasks, str(lc.get("weighting", "uncertainty")),
                             dict(lc.get("fixed_weights", {}) or {})).to(device)
     pos_w_t = {t: torch.tensor(w, device=device) for t, w in pos_w.items()}
     cls_w_t = {t: torch.tensor(w, dtype=torch.float32, device=device) for t, w in cls_w.items()}
 
-    decay, no_decay = [], []
-    for n, p in model.named_parameters():
-        (no_decay if p.ndim < 2 or "baseline" in n or "norm" in n.lower() or n.startswith("missing") else decay).append(p)
-    opt = torch.optim.AdamW([{"params": decay, "weight_decay": float(tc.weight_decay)},
-                             {"params": no_decay + list(weighter.parameters()), "weight_decay": 0.0}], lr=float(tc.lr))
+    prefixes = tuple(getattr(model, "branch_prefixes", ()) or ())
+    freeze_all = bool(tc.get("freeze_branches", False)) and bool(prefixes)
+    freeze_epochs = int(tc.get("freeze_epochs", 0) or 0) if prefixes else 0
+    lr = float(tc.lr)
+    if prefixes:
+        groups = {(b, d): [] for b in (False, True) for d in (False, True)}
+        for n, p in model.named_parameters():
+            is_branch = n.startswith(prefixes)
+            if is_branch and freeze_all:
+                p.requires_grad_(False)
+                continue
+            nd = p.ndim < 2 or "baseline" in n or "norm" in n.lower() or n.startswith("missing")
+            groups[(is_branch, not nd)].append(p)
+        mult = float(tc.get("branch_lr_mult", 1.0))
+        param_groups = []
+        for (is_branch, dec), ps in groups.items():
+            extra_ps = list(weighter.parameters()) if (not is_branch and not dec) else []
+            if ps or extra_ps:
+                param_groups.append({"params": ps + extra_ps, "weight_decay": float(tc.weight_decay) if dec else 0.0,
+                                     "lr": lr * (mult if is_branch else 1.0)})
+        opt = torch.optim.AdamW(param_groups, lr=lr)
+        if freeze_all:
+            model.set_branches_frozen(True)
+    else:
+        decay, no_decay = [], []
+        for n, p in model.named_parameters():
+            (no_decay if p.ndim < 2 or "baseline" in n or "norm" in n.lower() or n.startswith("missing") else decay).append(p)
+        opt = torch.optim.AdamW([{"params": decay, "weight_decay": float(tc.weight_decay)},
+                                 {"params": no_decay + list(weighter.parameters()), "weight_decay": 0.0}], lr=lr)
+    aux_weight = float(getattr(model, "aux_weight", 0.0) or 0.0)
+
+    class _Shim:  # 让 compute_losses 使用辅助头的生存基线
+        def __init__(self, heads):
+            self.heads = heads
+
+    def aux_loss_fn(o, heads, keep, targets):
+        sub = {k: v[keep] for k, v in targets.items()}
+        return compute_losses(o, sub, spec, _Shim(heads), pos_w_t, cls_w_t, survival_loss)
     sids_tr, sids_va = list(lab_tr["study_id"]), list(lab_va["study_id"])
     bs = int(tc.batch_size)
     accum = max(1, int(tc.get("grad_accum", 1)))
@@ -95,7 +142,8 @@ def train_one(sec, spec: TaskSpec, stores: Sequence, model_factory: Callable[[in
 
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     use_bf16 = device.type == "cuda" and str(tc.get("precision", "bf16")) == "bf16"
-    dl_tr = make_loader(sids_tr, stores, roles, dims, tg_tr, sec, True, bs)
+    ds_kw = model.dataset_kwargs(tc) if hasattr(model, "dataset_kwargs") else None
+    dl_tr = make_loader(sids_tr, stores, roles, dims, tg_tr, sec, True, bs, ds_kw)
     dl_va = make_loader(sids_va, stores, roles, dims, tg_va, sec, False, bs)
 
     best, best_state, best_epoch, bad = float("inf"), None, -1, 0
@@ -103,6 +151,8 @@ def train_one(sec, spec: TaskSpec, stores: Sequence, model_factory: Callable[[in
     history: List[dict] = []
     for epoch in range(int(tc.epochs)):
         t0 = time.time()
+        if freeze_epochs and not freeze_all:
+            model.set_branches_frozen(epoch < freeze_epochs)
         model.train()
         tot, nb = 0.0, 0
         opt.zero_grad(set_to_none=True)
@@ -111,13 +161,17 @@ def train_one(sec, spec: TaskSpec, stores: Sequence, model_factory: Callable[[in
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
                 out = model(batch)
             losses = compute_losses(out, batch["targets"], spec, model, pos_w_t, cls_w_t, survival_loss)
-            loss = weighter(losses) / accum
+            loss = weighter(losses)
+            if aux_heads and aux_weight > 0:
+                loss = loss + aux_weight * model.aux_losses(out, lambda o, h, keep: aux_loss_fn(o, h, keep, batch["targets"]))
+            loss = loss / accum
             if loss.requires_grad:
                 loss.backward()
             tot += float(loss.detach()) * accum
             nb += 1
             if (bi + 1) % accum == 0 or bi + 1 == len(dl_tr):
-                torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(weighter.parameters()),
+                torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad]
+                                               + list(weighter.parameters()),
                                                float(tc.get("grad_clip", 1.0)))
                 opt.step()
                 sched.step()
@@ -188,6 +242,8 @@ def predict(model, extra: dict, stores: Sequence, labels: pd.DataFrame, device, 
             r = {"study_id": sids[i]}
             for role in model.roles:
                 r[f"has_{role}"] = int(bool(batch["present"][role][k]))
+            for name, v in (out.get("row_extras") or {}).items():   # v3：CLS 对各 token 的注意力等
+                r[name] = float(v[k])
             for t, c in spec.multiclass.items():
                 p = torch.softmax(out[f"logits:{t}"][k].float(), -1).cpu().numpy()
                 for ci in range(c):
